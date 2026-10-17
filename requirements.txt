@@ -1,0 +1,17 @@
+# Install torch + compiled PyG extensions first: see README.md.
+torch_geometric==2.6.1
+einops>=0.7,<0.9
+torchmetrics==0.11.4
+fvcore==0.1.5.post20221221
+numpy>=1.24,<3
+pandas>=1.5,<4
+scipy>=1.10,<2
+scikit-learn>=1.2,<2
+numba>=0.58,<0.69
+PyYAML>=6,<7
+tqdm>=4.65,<5
+tensorboard>=2.12,<3
+joblib>=1.2,<2
+pytest>=7,<10
+# uproot and awkward are optional, only for raw ROOT preprocessing.
+# flash-linear-attention is optional for CUDA DeltaNet; HEPT does not use it.

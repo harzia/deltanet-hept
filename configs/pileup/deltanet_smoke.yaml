@@ -1,0 +1,39 @@
+# Offline CPU smoke test on SYNTHETIC pileup fixtures.
+device: cuda:0            # falls back to CPU automatically when no GPU
+seed: 42
+num_threads: 4
+note: smoke
+
+model_name: trans_deltanet
+model_kwargs:
+  num_heads: 4
+  h_dim: 16
+  n_layers: 2
+  chunk_size: 16
+  deltanet_sort_key: eta
+  deltanet_direction: bi
+  deltanet_qk_norm: l2
+  deltanet_qk_activation: silu
+  deltanet_use_beta: true
+  deltanet_allow_neg_eigval: false
+  deltanet_impl: torch
+
+loss_name: crossentropy
+loss_kwargs: {}
+
+optimizer_name: adam
+num_epochs: 1
+batch_size: 1
+optimizer_kwargs:
+  lr: 1.0e-3
+
+lr_scheduler_name: step
+lr_scheduler_kwargs:
+  gamma: 0.5
+  step_size: 500
+
+data_dir: data/pileup_smoke
+dataset_name: pileup
+main_metric: auc
+mode: max
+max_events: 4

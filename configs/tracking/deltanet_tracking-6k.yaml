@@ -1,0 +1,35 @@
+device: cuda:0
+seed: 42
+num_threads: 5
+note: run
+optimizer_name: adam
+batch_size: 1
+max_events: null
+model_name: trans_deltanet
+model_kwargs:
+  num_heads: 8
+  h_dim: 24
+  n_layers: 4
+  chunk_size: 64
+  deltanet_sort_key: eta
+  deltanet_direction: bi
+  deltanet_qk_norm: l2
+  deltanet_qk_activation: silu
+  deltanet_use_beta: true
+  deltanet_allow_neg_eigval: false
+  deltanet_impl: auto
+loss_name: infonce
+loss_kwargs:
+  dist_metric: l2_rbf
+  tau: 0.05
+num_epochs: 2000
+optimizer_kwargs:
+  lr: 0.01
+lr_scheduler_name: step
+lr_scheduler_kwargs:
+  gamma: 0.5
+  step_size: 500
+data_dir: data
+dataset_name: tracking-6k
+main_metric: accuracy@0.9
+mode: max

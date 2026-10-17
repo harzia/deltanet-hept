@@ -1,0 +1,42 @@
+# Tiny CPU smoke test for the tracking (InfoNCE) task on SYNTHETIC data.
+# Not a real benchmark -- just exercises the full DeltaNet code path end to end.
+device: cuda:0            # falls back to CPU automatically when no GPU
+seed: 42
+num_threads: 4
+note: smoke
+
+model_name: trans_deltanet
+model_kwargs:
+  num_heads: 4
+  h_dim: 16
+  n_layers: 2
+  chunk_size: 16
+  deltanet_sort_key: eta       # locality: eta | phi | r | pt | kt | original
+  deltanet_direction: bi       # bi | uni
+  deltanet_qk_norm: l2
+  deltanet_qk_activation: silu
+  deltanet_use_beta: true
+  deltanet_allow_neg_eigval: false
+  deltanet_impl: torch         # torch | fla | auto
+
+loss_name: infonce
+loss_kwargs:
+  dist_metric: l2_rbf
+  tau: 0.05
+
+optimizer_name: adam
+num_epochs: 2
+batch_size: 1
+optimizer_kwargs:
+  lr: 1.0e-3
+
+lr_scheduler_name: step
+lr_scheduler_kwargs:
+  gamma: 0.5
+  step_size: 500
+
+data_dir: data/tracking_smoke   # synthetic; real runs use data/
+dataset_name: tracking-6k
+main_metric: accuracy@0.9
+mode: max
+max_events: null

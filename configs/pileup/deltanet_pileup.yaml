@@ -1,0 +1,35 @@
+device: cuda:0
+seed: 42
+num_threads: 5
+note: run
+optimizer_name: adam
+batch_size: 1
+max_events: null
+model_name: trans_deltanet
+model_kwargs:
+  num_heads: 8
+  h_dim: 24
+  n_layers: 4
+  chunk_size: 64
+  deltanet_sort_key: eta
+  deltanet_direction: bi
+  deltanet_qk_norm: l2
+  deltanet_qk_activation: silu
+  deltanet_use_beta: true
+  deltanet_allow_neg_eigval: false
+  deltanet_impl: auto
+loss_name: focal
+loss_kwargs: {}
+num_epochs: 200
+optimizer_kwargs:
+  lr: 0.001
+lr_scheduler_name: impatient
+lr_scheduler_metric: loss
+lr_scheduler_kwargs:
+  factor: 0.5
+  patience: 20
+  mode: min
+data_dir: data
+dataset_name: pileup
+main_metric: auc
+mode: max

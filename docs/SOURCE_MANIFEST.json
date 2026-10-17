@@ -1,0 +1,421 @@
+{
+  "source_url": "https://j-jepa-vol.nrp-nautilus.io/linear-transformers/deltanet-hept/",
+  "retrieved_utc": "2026-10-01",
+  "original_files": [
+    {
+      "path": "AGENTS.md",
+      "size": 4919,
+      "sha256": "9b28ce422df9b5c28c5bb42b708d253635485d7631ccd2c3d7176ae283eb440a"
+    },
+    {
+      "path": "CLAUDE.md",
+      "size": 293,
+      "sha256": "a23724d5271a93ede84e82d5f83ca4d816c4ba17f812255cce9ac242b8861ea9"
+    },
+    {
+      "path": "DEVLOG.md",
+      "size": 3882,
+      "sha256": "7b82faf02ad3f3b4fa7a69fbd2a65eb3452c6fbd65664733b464e80cdef257de"
+    },
+    {
+      "path": "LICENSE",
+      "size": 1066,
+      "sha256": "6c860f21487ff62ab14061478d81330570e71e57a3764bc002f243c1e10778ea"
+    },
+    {
+      "path": "README.md",
+      "size": 7150,
+      "sha256": "3b11b0d1bce5e9c8f35af9d8f96b10714ec0aca99f665cf9e84b83cd7996d9ff"
+    },
+    {
+      "path": "configs/pileup/deltanet_pileup.yaml",
+      "size": 646,
+      "sha256": "65111352cda3297a7841440dc7f6967c8f7765a54d53d5fa6beed2632cbf5496"
+    },
+    {
+      "path": "configs/pileup/deltanet_smoke.yaml",
+      "size": 905,
+      "sha256": "7f934e6c18fe8a94f611b3e98616de29783914f8ecb436e38a46f6d26b452442"
+    },
+    {
+      "path": "configs/pileup/hept_pileup.yaml",
+      "size": 526,
+      "sha256": "598533c945264d7e80bd1e6f6c445fea9c2f4eac35de03fa4ccd344ead4333a4"
+    },
+    {
+      "path": "configs/tracking/deltanet_smoke.yaml",
+      "size": 1018,
+      "sha256": "c2d4a7ba22581d8af5745ce1d27df818981444003ed847a96838baa0aa251f23"
+    },
+    {
+      "path": "configs/tracking/deltanet_tracking-60k.yaml",
+      "size": 652,
+      "sha256": "fd8740938e28a08c0f59ada752426a294a64d35308817e426724cd64b237b769"
+    },
+    {
+      "path": "configs/tracking/deltanet_tracking-6k.yaml",
+      "size": 651,
+      "sha256": "ace090249d7036fffc86fd013711f1cd7d6f9700d9ca543861ed1b39d5347deb"
+    },
+    {
+      "path": "configs/tracking/hept_smoke.yaml",
+      "size": 718,
+      "sha256": "3fea23470e327ba580b6a4e8ee946b0f305df0cbc5e11906817c4a3869ed9808"
+    },
+    {
+      "path": "configs/tracking/hept_tracking-60k.yaml",
+      "size": 532,
+      "sha256": "3e5b7bfb66f57431c551cd8336f280dbd34f67ef25a05621405a1fc2b5125b79"
+    },
+    {
+      "path": "configs/tracking/hept_tracking-6k.yaml",
+      "size": 531,
+      "sha256": "a54e73a4f215d66d04438d77b2d1827c5eb6d19755e03a5482989de5b88e30ea"
+    },
+    {
+      "path": "docs/LOCALITY.md",
+      "size": 6032,
+      "sha256": "baa2effd2e4021e5f6766d73b48fcb13138d17cdc4f7a5884c2a6b65f495fbd1"
+    },
+    {
+      "path": "environment.hept.yml",
+      "size": 7104,
+      "sha256": "fe60c9a3640f85701cee1ae843d6b2914876efdd90350a4a31cab1b65fa47658"
+    },
+    {
+      "path": "requirements.txt",
+      "size": 556,
+      "sha256": "dfaf6a3e76b791d5183ec71e968261cac66d851d2d2eb13b3f0a2c4867c73969"
+    },
+    {
+      "path": "scripts/download_data.py",
+      "size": 2421,
+      "sha256": "ea96274e82e02ab76576fdc58a8e746de9ecac500d95670c2c5e031826bb2f08"
+    },
+    {
+      "path": "scripts/make_subset.py",
+      "size": 2762,
+      "sha256": "6fa5c94f64c802154ba76bb92fc8fb38cacc26bdaa6b64cd8f3633a1e62cd1a0"
+    },
+    {
+      "path": "scripts/make_synthetic_tracking.py",
+      "size": 4839,
+      "sha256": "2b467f041420d04197196807c4592c33d079b75645445bd34b40e28ccb9275ba"
+    },
+    {
+      "path": "scripts/shard_dataset.py",
+      "size": 3383,
+      "sha256": "e757a2f5fc97aa8056331541c8c0f00e596e4d7760d4cf2ab1bcd67ac366fb4d"
+    },
+    {
+      "path": "scripts/smoke_test.sh",
+      "size": 1771,
+      "sha256": "245e30ba0d759c64f1960d5da8491ae1b6576f243be220274a558250f9615efa"
+    },
+    {
+      "path": "scripts/sweep_sortings.sh",
+      "size": 856,
+      "sha256": "43090ae9d4de77146b6c78bb9761d4c188cc07fa45d6c40fc9f06de7d45c20eb"
+    },
+    {
+      "path": "src/configs/pileup/pileup_gnn_dgcnn.yaml",
+      "size": 519,
+      "sha256": "3a93734f6698a4bfb12aceed6ae5cc4b859fb3665bfa94e383c419da52fb7d60"
+    },
+    {
+      "path": "src/configs/pileup/pileup_gnn_gatedgnn.yaml",
+      "size": 512,
+      "sha256": "066f4ad3c8b03512cc36d66d2751fd3ac579e9844e1a2d4189a1cea28d49093d"
+    },
+    {
+      "path": "src/configs/pileup/pileup_gnn_gcn.yaml",
+      "size": 495,
+      "sha256": "cf153a2762bd5be6b08d8f73cadc42c985b1c798b9a406b631be22f002bace1d"
+    },
+    {
+      "path": "src/configs/pileup/pileup_gnn_gravnet.yaml",
+      "size": 521,
+      "sha256": "ffc167f912b4cd1ab5352a6370e52e39a0ec543e641bcc31a4cd5a740762f007"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_flatformer.yaml",
+      "size": 606,
+      "sha256": "61dc3ceebbea4f503bb1286226b4c0e8c5980428dcc47b11626504e8a9aaf63a"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_flt.yaml",
+      "size": 573,
+      "sha256": "e9e8b1e61e4b9a25f1638a01d56a6960c19965867e40d3bcb020184889c65039"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_hept.yaml",
+      "size": 582,
+      "sha256": "68065527d2a197350ecb6684185c47bea1f8e8661c5bff483bcca2ed98270696"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_pct.yaml",
+      "size": 530,
+      "sha256": "0126bb50c799aa88a53fe5679d081f51573776de985869d903a652b8088a9121"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_performer.yaml",
+      "size": 557,
+      "sha256": "5d27d362ca959467044f266645f4a4b960568f040dffc2687442fd759ab7e9e3"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_reformer.yaml",
+      "size": 580,
+      "sha256": "51e4d5bbbb64cabae7e39aa76fd73c44f28d856c0920c25c929f7aef342f7d65"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_sb.yaml",
+      "size": 584,
+      "sha256": "bd9f62d33c81c50b30b3b7b4db4eb7ae6a3a3b4dd9eb9178cf68b31abd099c87"
+    },
+    {
+      "path": "src/configs/pileup/pileup_trans_smyrf.yaml",
+      "size": 568,
+      "sha256": "c4f65f616180dc8604410d28657b4a01100e729185a176deb0e5110ddb74c85c"
+    },
+    {
+      "path": "src/configs/tracking/tracking_gnn_dgcnn.yaml",
+      "size": 507,
+      "sha256": "dee78ec014b8112a1794738cd4d30a660c373101e02215b2866a4bbbe17b6970"
+    },
+    {
+      "path": "src/configs/tracking/tracking_gnn_gatedgnn.yaml",
+      "size": 491,
+      "sha256": "c66129c3df98a1602ed0bd363a633b2545d1fd58aa8e374c3c61b819129bada3"
+    },
+    {
+      "path": "src/configs/tracking/tracking_gnn_gcn.yaml",
+      "size": 481,
+      "sha256": "0b9bf4874b391dbbe01d27581258e92afd3e923bdf798a601e9de83dd3367a1c"
+    },
+    {
+      "path": "src/configs/tracking/tracking_gnn_gravnet.yaml",
+      "size": 511,
+      "sha256": "d7fc48bd1b5c38755c0a09c639a7c57a031cb7213eb7bfc7d7085c9565f62928"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_flatformer.yaml",
+      "size": 589,
+      "sha256": "3d642b236a0204e829f5d0c6528d80d0bae67db1ff91b78479fbf4cc2f927a4b"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_flt.yaml",
+      "size": 561,
+      "sha256": "7a86c1c0eb7cf6dadb3a68b29284738b7131731633566e277c8552cfef234c13"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_hept.yaml",
+      "size": 717,
+      "sha256": "6f4b5456ffbe77ded9ffa0c487cf15bc8c982769e35e1ac2d38ff1696b797bb4"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_pct.yaml",
+      "size": 519,
+      "sha256": "227dbe3fa949783b9da71f872a953d7c7738bc164de2c68aa27cbacb8f40cf2e"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_performer.yaml",
+      "size": 554,
+      "sha256": "5ef771e88789be12994db5b0b740d7704a4121882975f2535a7d4803db4a07da"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_reformer.yaml",
+      "size": 565,
+      "sha256": "5cd9f4077b9dcd542eabc9a8e7060710d815ac7640a1737fd9718f1d755bfc61"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_sb.yaml",
+      "size": 571,
+      "sha256": "46f964720b71b87435fb5e7c71ee61e7ed0cbc479781701ba732eadb25ddc064"
+    },
+    {
+      "path": "src/configs/tracking/tracking_trans_smyrf.yaml",
+      "size": 558,
+      "sha256": "3e6311716b291a4409fd87a732c614a690df61db0cd59c902eac318fe4ba58f6"
+    },
+    {
+      "path": "src/datasets/__init__.py",
+      "size": 150,
+      "sha256": "777a36657ab2706faafc45576600a41db8d497bc1272379218952f4127a7eee8"
+    },
+    {
+      "path": "src/datasets/pileup.py",
+      "size": 4849,
+      "sha256": "4944af85db1f2fffff592d9b15aa79e1ccc14b10ee6c8e762e636b8ca577809c"
+    },
+    {
+      "path": "src/datasets/sharded.py",
+      "size": 2879,
+      "sha256": "96c8885ac9251df0389a7ed430f90ddfb2f462fd075af1f01692ab596b0952d3"
+    },
+    {
+      "path": "src/datasets/tracking.py",
+      "size": 8939,
+      "sha256": "09e905ec0e56eb2039c374ec80a65a341fc0db700c72bbc20329a7089146b871"
+    },
+    {
+      "path": "src/models/attention/__init__.py",
+      "size": 1358,
+      "sha256": "c1494f362c5bd868ff824c599f76f908503aaaec7026f79abb08ff86f65b7dd8"
+    },
+    {
+      "path": "src/models/attention/deltanet.py",
+      "size": 13797,
+      "sha256": "2e3d9620ec9e2d3fe9fa29aeeb6b3e52c1e43b852e78ac87d8705cca7a7dd641"
+    },
+    {
+      "path": "src/models/attention/flatformer.py",
+      "size": 5733,
+      "sha256": "2cfbdf2c48be1c76efb14af835676b4e9e35e9e3894a41c4894eef494e9e77c4"
+    },
+    {
+      "path": "src/models/attention/flt.py",
+      "size": 4401,
+      "sha256": "1249ce226ea80f4b783c6f90bacf2fc55ff2672e1108f7d28e09ef81742e1c36"
+    },
+    {
+      "path": "src/models/attention/hept.py",
+      "size": 4577,
+      "sha256": "23b25b8d58e1ac0e29c4be4dc756d5f657520ebd87ae88c8900a3667ae090d38"
+    },
+    {
+      "path": "src/models/attention/pct.py",
+      "size": 3309,
+      "sha256": "3f4ec19b025bbb76e04fc150083a67152affa6d574cea0057ab4bf75253bca64"
+    },
+    {
+      "path": "src/models/attention/performer.py",
+      "size": 4133,
+      "sha256": "ca576efb5a9c7edae8757fb2c05b555ebfb747566f6bc1c2e465176b0b7527aa"
+    },
+    {
+      "path": "src/models/attention/reformer.py",
+      "size": 13414,
+      "sha256": "c742d9bac8fbbe9ab7f61c6064a81ae45799dfd73252e681daf6d4517beb74ae"
+    },
+    {
+      "path": "src/models/attention/sb.py",
+      "size": 12914,
+      "sha256": "37fe067e7374c59510723f32466ff5851a522e8fef040615a1883091ae6bf1c9"
+    },
+    {
+      "path": "src/models/attention/smyrf.py",
+      "size": 9377,
+      "sha256": "b04dd2c7016bf73440eec38d178296cebafee1a66e6db6407725025e5b9b34d6"
+    },
+    {
+      "path": "src/models/baselines/__init__.py",
+      "size": 64,
+      "sha256": "9075629ca59cdaf9894a7a2a84cad9958bc93a953959e2b5efa15b913198f0c5"
+    },
+    {
+      "path": "src/models/baselines/gnns.py",
+      "size": 11402,
+      "sha256": "90732066497b71e40584e4d7bd6e7374a83848b040b777a7b71113d78647510c"
+    },
+    {
+      "path": "src/models/baselines/transformer.py",
+      "size": 10438,
+      "sha256": "eafed9fafcc5a0910a3696e0d310f6591c3a32c339227d356ee14998f9a011d2"
+    },
+    {
+      "path": "src/models/model_utils/__init__.py",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "src/models/model_utils/feature_maps_sb.py",
+      "size": 7566,
+      "sha256": "64eb1e1a671a9a81dbb9f1999cf7d46265394cc9be52a1774689ce8ff8487205"
+    },
+    {
+      "path": "src/models/model_utils/hash_utils.py",
+      "size": 11857,
+      "sha256": "aa2caece3be0950c58f56df701643686bc78fabf3ec229d3b5ed5e83893d2167"
+    },
+    {
+      "path": "src/models/model_utils/mask_utils.py",
+      "size": 8217,
+      "sha256": "81863aacdda04f7b3d4b2afffd932b128f37679b396f1865f0057c5e2c940e0a"
+    },
+    {
+      "path": "src/models/model_utils/rff_utils.py",
+      "size": 3680,
+      "sha256": "db07abd7c134b6f37deba8ddd949fb9992203da43adb9090f4bf534700d1285c"
+    },
+    {
+      "path": "src/models/model_utils/window_utils.py",
+      "size": 14604,
+      "sha256": "13f4569e32b80d53314baa7bb22aeed6e4e8bfa26098557f5fc3b1341393155c"
+    },
+    {
+      "path": "src/pileup_trainer.py",
+      "size": 7582,
+      "sha256": "c7b2cd0b62a74fb0385231176dc7f30e0a8c389cdd177d018e2fec927e0f15d3"
+    },
+    {
+      "path": "src/run.py",
+      "size": 12687,
+      "sha256": "a7baf941ba722f0858cfcf24fdae1306086cd9b43035ec0d17f6cc63e3d85e39"
+    },
+    {
+      "path": "src/tracking_trainer.py",
+      "size": 9243,
+      "sha256": "ae6bed63f07db093abe5960ea6efc6a48a785f5d0a460d126a49632213b2889f"
+    },
+    {
+      "path": "src/utils/__init__.py",
+      "size": 81,
+      "sha256": "c23128004e03c1957eddc8d0d1ee9b382dc0e102689dd042b834a24acc100cc6"
+    },
+    {
+      "path": "src/utils/get_data.py",
+      "size": 1394,
+      "sha256": "6136b59d1993185006bd36d6aeced4ab78203a9819eab157fcc34f39a4cbfd4f"
+    },
+    {
+      "path": "src/utils/get_model.py",
+      "size": 1870,
+      "sha256": "794bbc6ede0dbf7e5038c2b6e2f6760eab69e901418b030ced3aae1e63f04baa"
+    },
+    {
+      "path": "src/utils/losses.py",
+      "size": 4564,
+      "sha256": "cf2054699b5573690260062f17b424fdb43a3cce74824b1e4f30c748090ba7a6"
+    },
+    {
+      "path": "src/utils/metrics.py",
+      "size": 3640,
+      "sha256": "fe679e254bc938e1cbcdd3a512d4b506076d2cbc6dbdb957dbfa0b43d0ef97f4"
+    },
+    {
+      "path": "src/utils/run_logger.py",
+      "size": 2800,
+      "sha256": "aaad0270267fd61011537d292af107125ca5f67d6facb0e5c85104c1d0f52a73"
+    },
+    {
+      "path": "src/utils/url.py",
+      "size": 2372,
+      "sha256": "18430be194c46c4002b3a31273ffd515e3257788841fcea74cd3ff09692dde91"
+    },
+    {
+      "path": "src/utils/utils.py",
+      "size": 7560,
+      "sha256": "ec187a91e048fb3dfdef16f374b225e2cf85d8a87ef011c91031b96b8f4f635b"
+    },
+    {
+      "path": "tests/test_deltanet_correctness.py",
+      "size": 2296,
+      "sha256": "70e991d9447c4473757a09519e0f87a1ce6c5fb56ec8706cae125a3927541a15"
+    },
+    {
+      "path": "tests/test_sharded_equivalence.py",
+      "size": 2664,
+      "sha256": "b6536cb18419165489003bfe5b5918b2091ec0c420c269d983521ec36e6770ef"
+    }
+  ]
+}

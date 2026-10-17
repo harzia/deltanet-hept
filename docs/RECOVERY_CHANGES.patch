@@ -1,0 +1,3212 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..7b51ec5
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,14 @@
++name: CPU correctness and smoke tests
++on: [push, pull_request]
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.12'
++      - run: python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
++      - run: python -m pip install --only-binary=:all: torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cpu.html
++      - run: python -m pip install -r requirements.txt
++      - run: PYTHON=python bash scripts/smoke_test.sh
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..f7ea1d5
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++.venv/
++__pycache__/
++*.py[cod]
++.pytest_cache/
++data/
++data_sharded/
++logs/
++*.pt
++*.zip
++*.egg-info/
+diff --git a/AGENTS.md b/AGENTS.md
+index b0a7241..e155b37 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,3 +1,28 @@
++# Clarified target: Gaussian-kernel DeltaNet
++
++The requested model is `trans_deltanet` with `deltanet_kernel: hept`, or CLI
++`--kernel deltanet-hept`. Read docs/HEPT_KERNEL_DELTANET.md. It uses the delta
++rule with coordinate-augmented Gaussian similarities; the exact dual backend
++is a small-event reference, the RFF backend is scalable and approximate, and
++`hash` uses exact Gaussian delta updates in independent HEPT-selected buckets.
++Read docs/HASH_KERNEL_DELTANET.md for ordering, merging and resource controls.
++All three require the PyTorch path. Do not replace this with HEPT LSH attention.
++Run unit tests and smoke checks. No real-data improvement is claimed.
++
++# Current handoff notes (2026-10-01)
++
++This recovered project now has a repository-root `train.py` with `--kernel
++hept|deltanet`. Read the current README and docs/CHANGES_AND_CONCERNS.md first.
++The environment mentioned below belongs to the source author's dev box; create
++an environment using the current README. Run `bash scripts/smoke_test.sh` after
++changes; it is now offline and stops on failure. HEPT correctness tests compare
++both outputs and gradients to direct Gaussian math. Both supported mixers still
++require batch_size=1. Concrete padding, metric, loss and dependency fixes were
++made under the user's request to address concerns; see the audit before changing
++benchmark behavior further.
++
++---
++
+ # AGENTS.md — orientation for coding agents (Claude, Codex, …)
+ 
+ Read this before editing. Human docs are in `README.md`; the research agenda is
+diff --git a/DEVLOG.md b/DEVLOG.md
+index ec58a3c..728c8f5 100644
+--- a/DEVLOG.md
++++ b/DEVLOG.md
+@@ -70,3 +70,40 @@ because DeltaNet's data-dependent control flow isn't traceable — cosmetic only
+ - Implement Tier-1 locality: Morton/Hilbert serialization in `_sort_key_values`
+   (see `docs/LOCALITY.md`).
+ - Validate the `fla` GPU path on the training box.
++
++
++## 2026-10-01: recoverable HEPT/DeltaNet training handoff
++
++Recovered the full exposed source tree; added a root training entry point and
++explicit kernel selection, repaired padding and mass normalization, tracking
++metric memory/self exclusion, missing InfoNCE groups, loading/seed handling and
++smoke-test failure propagation. Added offline pileup fixtures, exact reference
++output/gradient tests and CPU CI. See docs/CHANGES_AND_CONCERNS.md for validation
++and remaining limits. Existing benchmark results are not claimed unchanged.
++
++
++## 2026-10-01: clarified Gaussian-kernel DeltaNet
++
++The intended target is DeltaNet using the HEPT Gaussian kernel. Added an exact
++dual Gaussian delta-rule reference and a unit-norm Fourier-feature approximation
++inside the original chunkwise state update. Added learned HEPT coordinate weights
++to this path, configs and `--kernel deltanet-hept`. Added six mathematical and
++backbone tests; 20 unit tests now pass. See docs/HEPT_KERNEL_DELTANET.md for the
++approximation limits and experiments. Also corrected pure HEPT tracking-6k region
++default from 150 to 15 based on Appendix C.2; not a verified optimum.
++
++## 2026-10-01: hash-selected Gaussian DeltaNet
++
++Added `deltanet_hept_backend: hash`: HEPT E2LSH/geographic selection with
++exact Gaussian delta writes in independent key-bucket memories. Causal reads
++compare original event ranks because query/key hash permutations differ.
++Forward/reverse outputs are summed and hash tables are averaged. Grouped
++processing and optional work-group activation checkpointing limit temporary
++matrix allocations. Fixed projections/regions are stored in checkpoints.
++Dedicated configs cover both tracking sizes and pileup, plus offline fixtures.
++28 unit tests pass, including independent recurrence/gradient checks, HEPT
++membership, single-bucket equivalence to full exact, checkpoint recomputation,
++and a 60k synthetic forward with bounded pairwise matrix dimensions. No
++full-dataset accuracy or GPU benchmark is claimed. See docs/HASH_KERNEL_DELTANET.md.
++The expanded eight-path smoke suite completed. Strict checkpoint evaluation
++reproduced all 10 tracking and all four pileup metrics within 1e-7.
+diff --git a/README.md b/README.md
+index 8730d02..f17609f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,161 +1,225 @@
+-# DeltaNet on the HEPT backbone
++# DeltaNet with the HEPT Gaussian kernel
+ 
+-An **apples-to-apples** study that drops the [DeltaNet](https://arxiv.org/abs/2406.06484)
+-linear-attention layer into the [HEPT](https://arxiv.org/abs/2402.12535)
+-point-transformer backbone for high-energy-physics point clouds, keeping
+-*everything else identical* (feature encoder, residual blocks, feed-forward,
+-layer concatenation, task heads, losses, and preprocessing). The only thing that
+-changes between HEPT and DeltaNet is the **token-mixing mechanism**.
++**Corrected implementation:** DeltaNet now has an option to use HEPT's
++geometry-aware Gaussian kernel inside its error-correcting delta rule. The
++first delivered archive only switched mixers; it did not implement this.
+ 
+-The motivating research question: linear transformers are **not
+-permutation-equivariant** — they are sequence models — but a point cloud has no
+-intrinsic order. How do we inject *locality* so a linear transformer can compete
+-with HEPT's LSH-based local attention? We start with the simplest lever —
+-**sorting the points** by a geometric/kinematic key — and build toward
+-space-filling curves and local grouping (see [`docs/LOCALITY.md`](docs/LOCALITY.md)).
++```bash
++# Install using the environment instructions below, then train:
++python train.py --config configs/tracking/deltanet_hept_tracking-6k.yaml --kernel deltanet-hept
++python train.py --config configs/tracking/deltanet_hept_tracking-60k.yaml --kernel deltanet-hept
++python train.py --config configs/pileup/deltanet_hept_pileup.yaml --kernel deltanet-hept
+ 
+----
++# Exact Gaussian updates inside HEPT-selected hash buckets:
++python train.py --config configs/tracking/deltanet_hept_hash_tracking-60k.yaml --kernel deltanet-hept
++```
+ 
+-## What changed vs. the original HEPT code
++| Selection | Mixer and similarity |
++| --- | --- |
++| `--kernel deltanet` | Original DeltaNet delta rule with the original query/key feature map |
++| `--kernel deltanet-hept` | DeltaNet delta rule with HEPT's augmented Gaussian kernel, approximated by finite features by default |
++| `--kernel hept` | Original HEPT normalized LSH attention, retained as a comparison |
+ 
+-This repo vendors the HEPT backbone (`src/`) essentially verbatim and adds:
++Read [docs/HEPT_KERNEL_DELTANET.md](docs/HEPT_KERNEL_DELTANET.md) for the exact
++recurrence, the scalable approximation and performance experiments. This is
++an experimental combination, not a claim of the paper's benchmark performance.
+ 
+-| File | Purpose |
+-|------|---------|
+-| `src/models/attention/deltanet.py` | **New.** DeltaNet token-mixer (pure-PyTorch chunkwise + recurrent), point-ordering, optional `fla` GPU kernel. |
+-| `src/models/baselines/transformer.py` | 3 small edits: register `deltanet` in `Attn`, keep the flat point layout for it in `prepare_input`, thread `pt` through for pt/kt sort keys. |
+-| `src/models/attention/__init__.py` | Optional imports so DeltaNet+HEPT work without the other baselines' heavy deps. |
+-| `src/run.py` | **New.** Unified train/test runner (both tasks), structured logging, no `nni`. |
+-| `src/utils/run_logger.py` | **New.** Human `run.log` + machine `metrics.jsonl` + `config.yaml` dump. |
+-| `configs/` | DeltaNet + HEPT configs for tracking-6k/60k and pileup, plus tiny smoke configs. |
+-| `scripts/`, `tests/` | Smoke test, sort-key sweep, subset makers, correctness tests. |
++The new `deltanet_hept_backend: hash` uses HEPT hash-selected blocks with exact
++Gaussian DeltaNet updates in independent bucket memories. It avoids RFF and
++full-event dense matrices. Dedicated configs cover tracking-6k, tracking-60k
++and pileup; see [docs/HASH_KERNEL_DELTANET.md](docs/HASH_KERNEL_DELTANET.md) for
++commands, causal ordering, table merging, resource controls and limitations.
+ 
+-The DeltaNet layer has the **same I/O contract** as `HEPTAttention`
+-(`forward(q, k, v, **kwargs) -> [N, h_dim]`), so the swap is genuinely local.
++Complete source recovered from:
++https://j-jepa-vol.nrp-nautilus.io/linear-transformers/deltanet-hept/
+ 
+----
++This project trains either **HEPT** or **DeltaNet** on the same point-transformer
++backbone for tracking and pileup. The linked directory already contained HEPT;
++this version makes the selection explicit, fixes correctness and installation
++issues, and adds independently checked HEPT tests.
+ 
+-## Tasks & data
++The paper is [Miao et al., ICML 2024](https://arxiv.org/abs/2402.12535).
++The paper authors' repository is https://github.com/Graph-COM/HEPT.
++That is the upstream HEPT repository; the origin of the custom DeltaNet project
++is not established. You do not need either repository to use this archive.
+ 
+-Two HEPT benchmarks, same backbone:
++## Install
+ 
+-* **tracking** — InfoNCE metric learning on tracker hits; metric `accuracy@0.9`.
+-* **pileup** — per-node binary classification; metric `auc` (average precision).
++Recommended: Linux, Python 3.10-3.12, a new virtual environment, PyTorch 2.5.1,
++PyG 2.6.1. The CPU stack below was tested with Python 3.12.
+ 
+-Datasets are the preprocessed releases from the HEPT paper
+-([Zenodo record 10694703](https://zenodo.org/records/10694703)). Download them
+-fresh:
++```bash
++python -m venv .venv
++source .venv/bin/activate
++python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
++python -m pip install --only-binary=:all: torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cpu.html
++python -m pip install -r requirements.txt
++```
++
++For an NVIDIA GPU with a compatible driver, use the CUDA 12.1 wheels instead
++of the two CPU installation commands:
+ 
+ ```bash
+-python scripts/download_data.py --dataset pileup        # ~1.8 GB zip -> 11 GB
+-python scripts/download_data.py --dataset tracking-6k   # ~2.5 GB zip -> 66 GB
+-python scripts/download_data.py --dataset tracking-60k  # ~0.4 GB zip -> 60 GB
++python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
++python -m pip install --only-binary=:all: torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cu121.html
++python -m pip install -r requirements.txt
+ ```
+ 
+-> **Memory note.** PyG's `InMemoryDataset` loads the *entire* processed `.pt`
+-> into RAM. The tracking files are ~60–66 GB. Do real training on a box with
+-> enough RAM/GPU. For quick local iteration use `scripts/make_subset.py`
+-> (a one-time full load to carve a small subset) or the synthetic smoke data.
++Use matching PyTorch and PyG extension builds; see the official
++[PyTorch version guide](https://pytorch.org/get-started/previous-versions/)
++and [PyG installation guide](https://pytorch-geometric.readthedocs.io/en/2.6.1/install/installation.html).
++The CUDA stack has not been executed in this workspace. `environment.hept.yml`
++is the original historical environment, retained for reference.
+ 
+-### Low-RAM streaming (sharded dataset)
++HEPT runs directly in PyTorch on CPU or CUDA; it does **not** require
++`flash-linear-attention`. For reproducible DeltaNet checks use
++`-o model_kwargs.deltanet_impl=torch`. The inherited optional FLA adapter is
++untested here and its API may depend on the installed FLA version. Installing
++an arbitrary newer FLA version may require a different PyTorch stack.
++`uproot` and `awkward` are optional for raw ROOT preprocessing, not for
++preprocessed data or the offline smoke tests.
+ 
+-To avoid the full in-RAM load entirely, re-shard the monolithic file into one
+-small file per event and load lazily (RAM then scales with the DataLoader batch,
+-not the dataset). Behaviour is **identical** — same splits, dims, and per-event
+-tensors (verified by `tests/test_sharded_equivalence.py`, and training
+-reproduces the same numbers bit-for-bit).
++## Try it without downloading benchmark data
+ 
+ ```bash
+-# one-time conversion (loads the source once; source is NOT modified/deleted):
+-python scripts/shard_dataset.py --dataset tracking-6k --src_data_dir data --out_root data_sharded
+-# then train against the shards:
+-cd src && python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml \
+-                        -o data_dir=../data_sharded -o use_sharded=true
++bash scripts/smoke_test.sh
+ ```
+ 
+-Set `use_sharded: true` + `data_dir: data_sharded` in a config to make it the
+-default. With shards you can also safely use `num_workers>0` in the DataLoader.
++This checks the math, generates small synthetic tracking and pileup fixtures,
++compares sharded and in-memory data, and trains standard DeltaNet, Gaussian-kernel DeltaNet and HEPT on both tasks.
++Every failure stops the script. If you use a different environment, set
++`PYTHON=/path/to/python bash scripts/smoke_test.sh`.
++Synthetic results validate execution; they are not physics benchmark scores.
++
++You can also run an individual experiment:
+ 
+-Preprocessing is **unchanged** from HEPT (same transforms, same features).
++```bash
++python scripts/make_synthetic_tracking.py
++python train.py --config configs/tracking/hept_smoke.yaml --kernel hept -o device=cpu
++python train.py --config configs/tracking/deltanet_smoke.yaml --kernel deltanet -o device=cpu
++```
+ 
+----
++## Train on the benchmark data
+ 
+-## Install
++The archive includes all source, configs, scripts, tests and attribution. Large
++datasets, checkpoints, training logs and Python caches are excluded.
++Download data separately, or place your existing preprocessed files at:
+ 
+-The dev box uses a venv layered on the base conda env (torch 1.13 + pyg 2.3):
++| Dataset | Expected file |
++| --- | --- |
++| tracking-6k | `data/tracking/processed/tracking-6k/data-6k.pt` |
++| tracking-60k | `data/tracking/processed/tracking-60k/data-60k.pt` |
++| pileup | `data/pileup/processed/data.pt` |
+ 
+ ```bash
+-python -m venv --system-site-packages .venv
+-.venv/bin/pip install einops "torchmetrics==0.11.4" fvcore
++python scripts/download_data.py --dataset tracking-6k
++python train.py --config configs/tracking/hept_tracking-6k.yaml --kernel hept
++python train.py --config configs/tracking/hept_tracking-60k.yaml --kernel hept
++python train.py --config configs/pileup/hept_pileup.yaml --kernel hept
+ ```
+ 
+-For GPU training with the fast `fla` Triton kernels, additionally
+-`pip install flash-linear-attention` and set `deltanet_impl: auto` (or `fla`).
+-
+----
++Tracking datasets require roughly 60-66 GB after extraction and the default
++loader holds the full processed dataset in RAM. `max_events` caps the split
++iteration **after loading**; it does not prevent that allocation. The pileup
++processed dataset is about 11 GB. Sizes are estimates inherited from the source.
+ 
+-## Quick start
++For lazy per-event loading after a one-time conversion:
+ 
+ ```bash
+-# 1. Verify the DeltaNet math + run tiny end-to-end smoke tests (CPU-safe):
+-bash scripts/smoke_test.sh
+-
+-# 2. Train on a real benchmark (GPU box):
+-cd src
+-python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml
+-python run.py --config ../configs/pileup/deltanet_pileup.yaml
++python scripts/shard_dataset.py --dataset tracking-6k --src_data_dir data --out_root data_sharded
++python train.py --config configs/tracking/hept_tracking-6k.yaml --kernel hept -o data_dir=data_sharded -o use_sharded=true -o num_workers=2
++```
+ 
+-# 3. Evaluate a checkpoint:
+-python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml \
+-              --mode test --ckpt ../logs/<run>/best_model.pt
++The conversion itself loads the monolithic file once and therefore still needs
++sufficient RAM. Shards preserve the original splits and transforms.
++Only load trusted `.pt` datasets: legacy PyG objects require pickle deserialization.
+ 
+-# 4. HEPT baseline (identical backbone) for comparison:
+-python run.py --config ../configs/tracking/hept_tracking-6k.yaml
++## Select the kernel
+ 
+-# 5. Sweep the locality order (sort key x direction):
+-bash scripts/sweep_sortings.sh configs/tracking/deltanet_tracking-6k.yaml
+-```
++Use `--kernel deltanet-hept` for the requested combination, `--kernel hept` for the HEPT comparison, or `--kernel deltanet` for the original DeltaNet. Without the flag, `model_name` in the
++YAML selects the mixer (`trans_hept` / `trans_deltanet`). `train.py` works from
++the repository root; the original `src/run.py` entry point also remains available.
++Relative `data_dir` is resolved from the repository root.
+ 
+-Any config value can be overridden on the CLI:
+-`-o model_kwargs.deltanet_sort_key=phi -o num_epochs=50 -o max_events=100`.
++The kernel flag preserves the configured backbone, loss, dataset and optimizer.
++When switching a DeltaNet config to HEPT, missing HEPT settings get defaults:
++block size 100, 3 hash tables, 15 regions for tracking-6k / 150 for tracking-60k / 140 for pileup,
++10 RPE weights per distance, and `pe_type: none`. Dedicated HEPT configs are
++preferable for benchmark runs. Override any setting with repeatable `-o` flags:
+ 
+----
++```bash
++python train.py --config configs/tracking/deltanet_tracking-6k.yaml --kernel hept -o model_kwargs.block_size=100 -o model_kwargs.n_hashes=3 -o model_kwargs.num_regions=150
++```
+ 
+-## DeltaNet knobs (`model_kwargs`)
++| HEPT option under `model_kwargs` | Meaning |
++| --- | --- |
++| `block_size` | Number of points per sparse attention block |
++| `n_hashes` | Number of OR hash tables |
++| `num_regions` | Target number of coordinate regions for AND construction |
++| `num_w_per_dist` | Original positive coordinate-weight parameterization |
++| `num_heads`, `h_dim`, `n_layers` | Backbone dimensions; keep matched when comparing mixers |
++| `use_ckpt` | Optional activation checkpointing |
++
++Both mixers currently require **`batch_size: 1`**. A forward handles one event;
++multiple events in a PyG batch are rejected explicitly to prevent event mixing.
++
++HEPT uses the paper's Gaussian kernel:
++
++```text
++q_hat = [q, sqrt(2 * omega) * coordinates]
++k_hat = [k, sqrt(2 * omega) * coordinates]
++A_ij = exp(-0.5 * ||q_hat_i - k_hat_j||^2)
++output = (sum_t A_t V) / (sum_t A_t 1)
++```
+ 
+-| key | values | meaning |
+-|-----|--------|---------|
+-| `deltanet_sort_key` | `eta` `phi` `r` `pt` `kt` `original` | the 1-D order the delta rule scans (locality lever) |
+-| `deltanet_direction` | `bi` `uni` | bidirectional (forward+backward, non-causal) or single causal scan |
+-| `chunk_size` | int | chunkwise kernel block; also an implicit local window |
+-| `deltanet_qk_norm` | `l2` `none` | L2-normalize q,k (stability of the delta update) |
+-| `deltanet_qk_activation` | `silu` `relu` `identity` | q,k feature map |
+-| `deltanet_use_beta` | bool | learn per-point write strength `beta` (else 1) |
+-| `deltanet_allow_neg_eigval` | bool | scale `beta` by 2 (allows negative eigenvalues) |
+-| `deltanet_impl` | `auto` `torch` `fla` | kernel backend; `auto` uses `fla` on CUDA if installed |
++`omega` is positive and learned through the original `w_rpe` parameterization.
++The original transforms augment geometric eta/phi with other coordinate
++features; these are preserved. LSH uses coordinate regions to align separately
++sorted query and key blocks. Repeated pairs in multiple tables contribute to
++each table, as in the authors' implementation. Normalization uses total kernel
++mass across tables, not an unweighted average of table outputs.
+ 
+-> On the tracking task, `pt`/`kt` sort keys feed a weak pt signal into ordering,
+-> which HEPT does not use — a slightly different setup, flagged in the logs.
+-> Default is `eta` (pure geometry).
++`--kernel hept` selects the HEPT sparse attention mixer. The new
++`--kernel deltanet-hept` option instead uses the Gaussian kernel in DeltaNet's
++delta-rule recurrence; see the linked derivation for its exact and approximate paths.
++Attention avoids a dense N-by-N matrix, with block attention cost proportional
++to `n_hashes * N * block_size` and sorting cost proportional to `N log N` for
++fixed head dimensions. Tracking evaluation still takes quadratic time; its
++distance matrix is now processed in chunks to bound peak memory.
+ 
+----
++## Evaluate and inspect logs
+ 
+-## Logs
++```bash
++python train.py --config configs/tracking/hept_tracking-6k.yaml --kernel hept --mode test --ckpt logs/YOUR_RUN/best_model.pt
++```
+ 
+-Every run writes `logs/<stamp>_<model>_<dataset>_<seed>_<note>/`:
++Use the same backbone and kernel settings as the checkpoint's `config.yaml`.
++Each run records `config.yaml`, `run.log`, `metrics.jsonl`, and `best_model.pt`.
++Checkpoint selection uses validation only. The inherited runner also reports
++test metrics each epoch; avoid tuning hyperparameters against those test results.
++The `auc` field for pileup is **average precision**, not ROC AUC; `roc` reports
++ROC AUC separately. Tracking `accuracy@0.9` is the inherited neighborhood
++precision metric on reconstructable points above the pt threshold, not complete
++track reconstruction efficiency.
+ 
+-* `run.log` — human-readable, timestamped.
+-* `metrics.jsonl` — one JSON record per event (`kind ∈ {meta,epoch,final}`); load with `pandas.read_json(path, lines=True)`.
+-* `config.yaml` — exact resolved config.
+-* `best_model.pt` — best checkpoint by the main metric.
++## Review and upload to GitHub
+ 
+-See [`AGENTS.md`](AGENTS.md) for the repo map and conventions (for coding agents),
+-and [`DEVLOG.md`](DEVLOG.md) for the running development log.
++See [docs/CHANGES_AND_CONCERNS.md](docs/CHANGES_AND_CONCERNS.md) for exact fixes,
++remaining limitations and validation. [docs/SOURCE_MANIFEST.json](docs/SOURCE_MANIFEST.json)
++records hashes of all 83 retrieved source/config/document/test files before edits.
++Original docs and legacy baseline trainers are retained. Use `train.py` for the
++supported HEPT/DeltaNet workflow; legacy trainers may need extra dependencies.
+ 
+----
++To publish the extracted folder into your own new, empty GitHub repository:
+ 
+-## References
++```bash
++git init
++git add .
++git commit -m "Add HEPT and DeltaNet training code"
++git branch -M main
++git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
++git push -u origin main
++```
+ 
+-* Miao et al., *LSH-Based Efficient Point Transformer (HEPT)*, ICML 2024. https://arxiv.org/abs/2402.12535
+-* Yang et al., *Parallelizing Linear Transformers with the Delta Rule over Sequence Length (DeltaNet)*, 2024. https://arxiv.org/abs/2406.06484
+-* `flash-linear-attention`: https://github.com/fla-org/flash-linear-attention
++Retain `LICENSE` and the upstream attribution. No repository is created or
++published automatically.
+diff --git a/configs/pileup/deltanet_hept_hash_pileup.yaml b/configs/pileup/deltanet_hept_hash_pileup.yaml
+new file mode 100644
+index 0000000..26b5c5c
+--- /dev/null
++++ b/configs/pileup/deltanet_hept_hash_pileup.yaml
+@@ -0,0 +1,44 @@
++# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-hash-delta-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: hash
++  block_size: 100
++  n_hashes: 3
++  num_regions: 140
++  deltanet_hash_chunk_buckets: 64
++  deltanet_hash_checkpoint: true
++  num_w_per_dist: 10
++loss_name: focal
++loss_kwargs: {}
++num_epochs: 200
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: impatient
++lr_scheduler_metric: loss
++lr_scheduler_kwargs:
++  factor: 0.5
++  patience: 20
++  mode: min
++data_dir: data
++dataset_name: pileup
++main_metric: auc
++mode: max
+diff --git a/configs/pileup/deltanet_hept_hash_smoke.yaml b/configs/pileup/deltanet_hept_hash_smoke.yaml
+new file mode 100644
+index 0000000..cdc5bdd
+--- /dev/null
++++ b/configs/pileup/deltanet_hept_hash_smoke.yaml
+@@ -0,0 +1,42 @@
++# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
++device: cuda:0
++seed: 42
++num_threads: 4
++note: hept-hash-delta-smoke
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 4
++  h_dim: 16
++  n_layers: 2
++  chunk_size: 16
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: hash
++  block_size: 32
++  n_hashes: 3
++  num_regions: 140
++  deltanet_hash_chunk_buckets: 64
++  deltanet_hash_checkpoint: true
++  num_w_per_dist: 10
++loss_name: crossentropy
++loss_kwargs: {}
++optimizer_name: adam
++num_epochs: 1
++batch_size: 1
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data/pileup_smoke
++dataset_name: pileup
++main_metric: auc
++mode: max
++max_events: 4
+diff --git a/configs/pileup/deltanet_hept_pileup.yaml b/configs/pileup/deltanet_hept_pileup.yaml
+new file mode 100644
+index 0000000..cb548ee
+--- /dev/null
++++ b/configs/pileup/deltanet_hept_pileup.yaml
+@@ -0,0 +1,41 @@
++# DeltaNet delta-rule mixer with the HEPT Gaussian kernel approximated by RFF.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-kernel-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128
++  deltanet_kernel_seed: 0
++  num_w_per_dist: 10
++loss_name: focal
++loss_kwargs: {}
++num_epochs: 200
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: impatient
++lr_scheduler_metric: loss
++lr_scheduler_kwargs:
++  factor: 0.5
++  patience: 20
++  mode: min
++data_dir: data
++dataset_name: pileup
++main_metric: auc
++mode: max
+diff --git a/configs/pileup/deltanet_hept_smoke.yaml b/configs/pileup/deltanet_hept_smoke.yaml
+new file mode 100644
+index 0000000..c3cbee3
+--- /dev/null
++++ b/configs/pileup/deltanet_hept_smoke.yaml
+@@ -0,0 +1,39 @@
++# DeltaNet delta-rule mixer with the HEPT Gaussian kernel approximated by RFF.
++device: cuda:0
++seed: 42
++num_threads: 4
++note: hept-kernel-smoke
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 4
++  h_dim: 16
++  n_layers: 2
++  chunk_size: 16
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128
++  deltanet_kernel_seed: 0
++  num_w_per_dist: 10
++loss_name: crossentropy
++loss_kwargs: {}
++optimizer_name: adam
++num_epochs: 1
++batch_size: 1
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data/pileup_smoke
++dataset_name: pileup
++main_metric: auc
++mode: max
++max_events: 4
+diff --git a/configs/pileup/deltanet_smoke.yaml b/configs/pileup/deltanet_smoke.yaml
+index 62f221f..bd10839 100644
+--- a/configs/pileup/deltanet_smoke.yaml
++++ b/configs/pileup/deltanet_smoke.yaml
+@@ -1,6 +1,4 @@
+-# Tiny CPU smoke test for the pileup (node classification) task on REAL data.
+-# Uses max_events to touch only a handful of events (the 11 GB file is loaded
+-# once by PyG's InMemoryDataset, which is safe here; keep max_events small).
++# Offline CPU smoke test on SYNTHETIC pileup fixtures.
+ device: cuda:0            # falls back to CPU automatically when no GPU
+ seed: 42
+ num_threads: 4
+@@ -34,7 +32,7 @@ lr_scheduler_kwargs:
+   gamma: 0.5
+   step_size: 500
+ 
+-data_dir: data
++data_dir: data/pileup_smoke
+ dataset_name: pileup
+ main_metric: auc
+ mode: max
+diff --git a/configs/pileup/hept_smoke.yaml b/configs/pileup/hept_smoke.yaml
+new file mode 100644
+index 0000000..2133d22
+--- /dev/null
++++ b/configs/pileup/hept_smoke.yaml
+@@ -0,0 +1,31 @@
++# Offline CPU HEPT smoke test on synthetic pileup.
++device: cuda:0
++seed: 42
++num_threads: 4
++note: smoke
++model_name: trans_hept
++model_kwargs:
++  block_size: 16
++  n_hashes: 2
++  num_regions: 10
++  pe_type: none
++  num_heads: 4
++  h_dim: 16
++  n_layers: 2
++  num_w_per_dist: 10
++loss_name: crossentropy
++loss_kwargs: {}
++optimizer_name: adam
++num_epochs: 1
++batch_size: 1
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data/pileup_smoke
++dataset_name: pileup
++main_metric: auc
++mode: max
++max_events: 4
+diff --git a/configs/tracking/deltanet_hept_hash_smoke.yaml b/configs/tracking/deltanet_hept_hash_smoke.yaml
+new file mode 100644
+index 0000000..c503239
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_hash_smoke.yaml
+@@ -0,0 +1,44 @@
++# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
++device: cuda:0
++seed: 42
++num_threads: 4
++note: hept-hash-delta-smoke
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 4
++  h_dim: 16
++  n_layers: 2
++  chunk_size: 16
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: hash
++  block_size: 32
++  n_hashes: 3
++  num_regions: 15
++  deltanet_hash_chunk_buckets: 64
++  deltanet_hash_checkpoint: true
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++optimizer_name: adam
++num_epochs: 2
++batch_size: 1
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data/tracking_smoke
++dataset_name: tracking-6k
++main_metric: accuracy@0.9
++mode: max
++max_events: null
+diff --git a/configs/tracking/deltanet_hept_hash_tracking-60k.yaml b/configs/tracking/deltanet_hept_hash_tracking-60k.yaml
+new file mode 100644
+index 0000000..cc29f48
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_hash_tracking-60k.yaml
+@@ -0,0 +1,44 @@
++# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-hash-delta-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: hash
++  block_size: 100
++  n_hashes: 3
++  num_regions: 150
++  deltanet_hash_chunk_buckets: 64
++  deltanet_hash_checkpoint: true
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++num_epochs: 2000
++optimizer_kwargs:
++  lr: 0.01
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data
++dataset_name: tracking-60k
++main_metric: accuracy@0.9
++mode: max
+diff --git a/configs/tracking/deltanet_hept_hash_tracking-6k.yaml b/configs/tracking/deltanet_hept_hash_tracking-6k.yaml
+new file mode 100644
+index 0000000..76d3941
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_hash_tracking-6k.yaml
+@@ -0,0 +1,44 @@
++# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-hash-delta-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: hash
++  block_size: 100
++  n_hashes: 3
++  num_regions: 15
++  deltanet_hash_chunk_buckets: 64
++  deltanet_hash_checkpoint: true
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++num_epochs: 2000
++optimizer_kwargs:
++  lr: 0.01
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data
++dataset_name: tracking-6k
++main_metric: accuracy@0.9
++mode: max
+diff --git a/configs/tracking/deltanet_hept_smoke.yaml b/configs/tracking/deltanet_hept_smoke.yaml
+new file mode 100644
+index 0000000..1f97d2e
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_smoke.yaml
+@@ -0,0 +1,41 @@
++# DeltaNet delta-rule mixer with the HEPT Gaussian kernel approximated by RFF.
++device: cuda:0
++seed: 42
++num_threads: 4
++note: hept-kernel-smoke
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 4
++  h_dim: 16
++  n_layers: 2
++  chunk_size: 16
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128
++  deltanet_kernel_seed: 0
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++optimizer_name: adam
++num_epochs: 2
++batch_size: 1
++optimizer_kwargs:
++  lr: 0.001
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data/tracking_smoke
++dataset_name: tracking-6k
++main_metric: accuracy@0.9
++mode: max
++max_events: null
+diff --git a/configs/tracking/deltanet_hept_tracking-60k.yaml b/configs/tracking/deltanet_hept_tracking-60k.yaml
+new file mode 100644
+index 0000000..5f83193
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_tracking-60k.yaml
+@@ -0,0 +1,41 @@
++# DeltaNet delta-rule mixer with the HEPT Gaussian kernel approximated by RFF.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-kernel-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128
++  deltanet_kernel_seed: 0
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++num_epochs: 2000
++optimizer_kwargs:
++  lr: 0.01
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data
++dataset_name: tracking-60k
++main_metric: accuracy@0.9
++mode: max
+diff --git a/configs/tracking/deltanet_hept_tracking-6k.yaml b/configs/tracking/deltanet_hept_tracking-6k.yaml
+new file mode 100644
+index 0000000..58d8233
+--- /dev/null
++++ b/configs/tracking/deltanet_hept_tracking-6k.yaml
+@@ -0,0 +1,41 @@
++# DeltaNet delta-rule mixer with the HEPT Gaussian kernel approximated by RFF.
++device: cuda:0
++seed: 42
++num_threads: 5
++note: hept-kernel-run
++optimizer_name: adam
++batch_size: 1
++max_events: null
++model_name: trans_deltanet
++model_kwargs:
++  num_heads: 8
++  h_dim: 24
++  n_layers: 4
++  chunk_size: 64
++  deltanet_sort_key: eta
++  deltanet_direction: bi
++  deltanet_qk_norm: none
++  deltanet_qk_activation: identity
++  deltanet_use_beta: true
++  deltanet_allow_neg_eigval: false
++  deltanet_impl: torch
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128
++  deltanet_kernel_seed: 0
++  num_w_per_dist: 10
++loss_name: infonce
++loss_kwargs:
++  dist_metric: l2_rbf
++  tau: 0.05
++num_epochs: 2000
++optimizer_kwargs:
++  lr: 0.01
++lr_scheduler_name: step
++lr_scheduler_kwargs:
++  gamma: 0.5
++  step_size: 500
++data_dir: data
++dataset_name: tracking-6k
++main_metric: accuracy@0.9
++mode: max
+diff --git a/configs/tracking/hept_tracking-6k.yaml b/configs/tracking/hept_tracking-6k.yaml
+index 71d0dc0..130dfac 100644
+--- a/configs/tracking/hept_tracking-6k.yaml
++++ b/configs/tracking/hept_tracking-6k.yaml
+@@ -12,7 +12,7 @@ model_kwargs:
+   n_layers: 4
+   block_size: 100
+   n_hashes: 3
+-  num_regions: 150
++  num_regions: 15  # Paper tuning range for tracking-6k: 10, 15, 20
+   pe_type: none
+   num_w_per_dist: 10
+ loss_name: infonce
+diff --git a/docs/CHANGES_AND_CONCERNS.md b/docs/CHANGES_AND_CONCERNS.md
+new file mode 100644
+index 0000000..07169db
+--- /dev/null
++++ b/docs/CHANGES_AND_CONCERNS.md
+@@ -0,0 +1,131 @@
++# Changes, audit notes and validation
++
++**Clarification update:** the requested Gaussian-kernel DeltaNet is now implemented.
++Read HEPT_KERNEL_DELTANET.md for the new exact and RFF paths. The first archive
++only selected the existing mixers. The notes below describe that initial audit;
++the current package also adds learned coordinate weights to the Gaussian DeltaNet
++path, new configs and six additional unit tests (20 total). Pure HEPT tracking-6k
++regions are corrected to 15 from the paper's 10/15/20 tuning range.
++
++
++## What was recovered
++
++The provided URL is an Nginx directory listing, not a GitHub repository.
++All 83 exposed source, script, test, config, license and documentation files
++were retrieved, including legacy baselines and trainers. The source manifest
++records their original SHA-256 hashes. Runtime caches, data and logs were not
++included. The recovered `hept.py` was byte-identical to the corresponding
++`Graph-COM/HEPT/main/src/models/attention/hept.py` file when inspected.
++The original project already had HEPT configs and the `trans_hept` dispatch.
++
++## Supported changes
++
++| Area | Change and reason |
++| --- | --- |
++| Kernel selection | Added root `train.py` and `--kernel hept\|deltanet`; missing HEPT knobs receive explicit defaults. Existing YAML selection remains supported. |
++| HEPT padding | Dummy keys are masked in both the Gaussian numerator and denominator. Previously their zero values still increased the denominator, shrinking real outputs. |
++| Hashing and regions | Dummy points no longer determine the hash range or coordinate quantiles. Region partitions are computed on real points before padding. |
++| Numerical stability | Each table computes normalized Gaussian weights and log kernel mass; OR results merge by mass in log space. This preserves the paper's sum-of-numerators / sum-of-denominators rule and avoids all-zero underflow normalization. |
++| Autograd | Padding masks use out-of-place operations. Reference tests verify query, key, value and RPE gradients. |
++| Activation checkpointing | Uses `use_reentrant=False`. Dictionary forwards no longer permanently disable `use_ckpt`; current region parameters are threaded after device moves. |
++| Tracking metric memory | Default query chunks are 1024 points, avoiding the full N-by-N distance allocation. The calculation still takes quadratic time. |
++| Tracking metric self-neighbor | Self is excluded by index rather than assuming it is the first nearest neighbor; tiny events can use fewer than 19 available neighbors. |
++| InfoNCE grouping | Negative reductions are expanded to the actual point IDs before indexing. The prior compact group array could silently return another point's sum or fail when a group was missing. |
++| Loss validation | Gives a clear error when no eligible positive pairs exist; validates positive temperature. Focal loss now honors configured keyword arguments. |
++| Loading and seed | Explicit dataset pickle loading supports trusted legacy PyG files across the PyTorch 2.6 default change. Checkpoints use weights-only loading. The configured seed is restored after legacy dataset constructors. |
++| Downloads | Declining the loaders' download prompt no longer deletes the existing dataset directory. Also fixed the raw tracking path join. |
++| Profiling | FLOP tracing is opt-in (`count_flops: true`); it no longer allocates a synthetic 10,000-point experiment on every startup or permanently changes checkpoint mode. The profiler restores model mode and CPU RNG state. |
++| Worker setting | `num_workers` is now passed to the loaders; lazy shards can use it. |
++| Dependencies | Complete requirements and tested CPU setup replace reliance on an unseen author's base environment. ROOT imports are lazy. |
++| Smoke checks | Synthetic fixtures cover both tasks and mixers, with real exit-code propagation. No benchmark download is needed. Modern PyG keys are handled in the shard equivalence check, and temporary shards are cleaned up. |
++| Logging | Run directories include microseconds to avoid collisions between quick runs. |
++| Handoff | Added usage, source provenance, regression tests, GitHub ignore rules and CPU CI. |
++
++For the initially recovered comparison, the backbone dimensions, feature transforms, positional-weight parameterization,
++normal losses and benchmark splits are preserved. Correcting padding, hashing
++range, tie handling, RNG side effects and missing negative groups intentionally
++changes affected outputs. Existing state-dict tensor shapes are preserved, but
++**do not claim bit-for-bit agreement with old training results**. Retrain and
++rerun both mixers for a fair comparison.
++
++## What the tests establish
++
++Local validation used Python 3.12, PyTorch 2.5.1+cpu, PyG 2.6.1,
++torch-scatter 2.1.2+pt25cpu and torch-cluster 1.6.3+pt25cpu.
++
++- 14 unit tests passed, including the inherited DeltaNet forward tests.
++- HEPT outputs and gradients match independent dense squared-distance math
++  for a single full block and a multiset of sparse LSH candidates across tables.
++  Cases cover one point, exact block multiples, partial blocks and multiple hashes.
++- Constant values are no longer diluted by dummy keys; underflow and fully
++  masked block behavior are tested.
++- A full HEPT backbone backward pass works with activation checkpointing.
++- DeltaNet chunkwise gradients match the recurrence in float64.
++- Missing InfoNCE negative groups match a manually computed loss.
++- Metric chunking agrees with the same metric computed in a single query chunk.
++- All 30 synthetic tracking events, transforms, dimensions and splits agree
++  between in-memory loading and lazy shards.
++- HEPT and DeltaNet each trained, validated, tested and wrote a checkpoint for
++  both tracking and pileup on the offline fixtures.
++- Reloading each HEPT checkpoint in test mode reproduced all stored test metrics.
++- Switching a DeltaNet YAML to HEPT using only `--kernel hept` also completed training.
++- Python compilation, shell syntax and whitespace checks passed.
++
++Synthetic training is a pipeline check, not evidence of convergence or physics
++quality. No real dataset was downloaded or trained, and no GPU was available.
++CI is supplied but has not been run on GitHub.
++
++## Remaining concerns and experimental limits
++
++1. **One event per forward.** Keep `batch_size: 1`. Efficient packed multi-event
++   HEPT would require a separate batching design and batch-isolation tests.
++2. **Large data allocation.** In-memory tracking files need tens of GB of RAM.
++   `max_events` does not solve that. Sharding solves subsequent loading, but the
++   current converter still needs one full load and creates many small files.
++3. **Sparse approximation.** HEPT is LSH block attention over a Gaussian kernel;
++   a small block size, too few hashes or poorly chosen regions can miss useful
++   pairs. Tune on validation and record the settings and parameter counts.
++4. **GPU and FLA.** PyTorch HEPT has no custom fused Triton implementation here.
++   CUDA and the inherited optional FLA adapter were not validated. Use the
++   PyTorch DeltaNet backend for the tested path; FLA signatures and supported
++   dtypes can vary with the FLA version.
++5. **Ground-truth pt.** On simulated tracking, `pt` may be truth metadata
++   unavailable before reconstruction. Opt-in DeltaNet `pt`/`kt` ordering can
++   leak that information. Default `eta` avoids this extra input.
++6. **Chunk size is not a locality window.** DeltaNet carries state across chunks;
++   `chunk_size` controls its computation, not a hard cutoff on context. Geometry
++   sorting supplies an ordering; ties can still make output order-dependent.
++7. **Periodic phi.** The inherited coordinate differences and region sorting
++   do not wrap phi across -pi/pi. Changing this would change the benchmark model,
++   so it is documented rather than silently changing the physics preprocessing.
++8. **Metric names.** Pileup `auc` is average precision. Tracking `accuracy@0.9`
++   measures embedding neighbors, not complete tracking efficiency. Evaluation
++   assumes cluster sizes fit the inherited `K=19` budget and filters have eligible
++   points. Undefined cases remain explicit errors, not fabricated scores.
++9. **Objective conventions.** The inherited `l2_rbf` InfoNCE similarity uses
++   unsquared L2 distance (distinct from the squared-distance HEPT attention
++   kernel). The inherited focal implementation applies a scalar alpha to all
++   examples. These conventions are preserved for comparison.
++10. **Benchmark protocol.** Test metrics are reported each epoch, though the best
++    checkpoint is selected by validation only. Do not use test feedback to tune.
++    The tracking loader's inherited event sorting and split recomputation are
++    preserved. Use the saved resolved config for repeatable evaluation.
++11. **Legacy baselines.** Original alternative attention modules and the NNI
++    trainers remain in the source. Their optional libraries and behavior are
++    outside the validated HEPT/DeltaNet workflow. Broad optional-import handling
++    in the inherited registry may conceal an unavailable baseline's error.
++12. **Precision.** End-to-end tests use float32 or float64. Mixed-precision and
++    extreme coordinate-weight overflow are not validated; use float32 initially.
++
++## References and attribution
++
++The later hash-backend update adds local exact Gaussian DeltaNet memories
++selected by HEPT hashing. It changes the recurrence through bucket resets and
++averages independent table outputs. See [HASH_KERNEL_DELTANET.md](HASH_KERNEL_DELTANET.md)
++for the explicit math, resource controls and validation. This does not establish
++improved physics accuracy; full-dataset and GPU experiments remain unrun.
++
++- Original directory: https://j-jepa-vol.nrp-nautilus.io/linear-transformers/deltanet-hept/
++- HEPT paper: https://arxiv.org/abs/2402.12535, especially Sections 4.1-4.3.
++- Paper authors' implementation: https://github.com/Graph-COM/HEPT
++- Retain the supplied MIT license and Graph-COM copyright notice.
+diff --git a/docs/HASH_KERNEL_DELTANET.md b/docs/HASH_KERNEL_DELTANET.md
+new file mode 100644
+index 0000000..3dfaa2d
+--- /dev/null
++++ b/docs/HASH_KERNEL_DELTANET.md
+@@ -0,0 +1,147 @@
++# Hash-selected Gaussian DeltaNet
++
++This backend keeps DeltaNet's residual writes and evaluates the HEPT Gaussian
++kernel exactly within hash-selected blocks. It uses independent memories for
++each key block in each hash table. It approximates full-event Gaussian DeltaNet
++by limiting interactions, with no random Fourier features.
++
++## Train
++
++```bash
++python train.py --config configs/tracking/deltanet_hept_hash_tracking-6k.yaml --kernel deltanet-hept
++python train.py --config configs/tracking/deltanet_hept_hash_tracking-60k.yaml --kernel deltanet-hept
++python train.py --config configs/pileup/deltanet_hept_hash_pileup.yaml --kernel deltanet-hept
++```
++
++Existing Gaussian DeltaNet configs can also select this backend:
++
++```bash
++python train.py --config configs/tracking/deltanet_hept_tracking-60k.yaml --kernel deltanet-hept \
++  -o model_kwargs.deltanet_hept_backend=hash \
++  -o model_kwargs.block_size=100 \
++  -o model_kwargs.n_hashes=3 \
++  -o model_kwargs.num_regions=150
++```
++
++Use repeatable `-o` flags, one assignment per flag. Gaussian backends require
++`deltanet_impl: torch`, `deltanet_qk_activation: identity` and
++`deltanet_qk_norm: none`; the kernel CLI sets those. Existing RFF and full exact
++configs retain their behavior. The new hash configs explicitly select `hash`.
++
++| Option under `model_kwargs` | Meaning / default |
++| --- | --- |
++| `deltanet_hept_backend: hash` | Select local exact Gaussian delta updates |
++| `block_size: 100` | Maximum keys and queries in each selected block |
++| `n_hashes: 3` | Independent hash-table memories, averaged at output |
++| `num_regions` | HEPT geographic region construction; configs use 15 / 150 / 140 for tracking-6k / tracking-60k / pileup |
++| `deltanet_hash_chunk_buckets: 64` | Buckets per head processed in one work group, one table at a time |
++| `deltanet_hash_checkpoint: true` | Recompute work-group kernel matrices in backward to reduce retained activations |
++| `deltanet_sort_key: eta` | Original event ordering used for causal updates and reads |
++| `deltanet_direction: bi` | Sum forward and reverse memory reads; `uni` uses forward only |
++
++`chunk_size` controls the standard/RFF scan and is not used by `hash`.
++`deltanet_kernel_features`, `deltanet_kernel_seed` and
++`deltanet_hept_exact_max_points` are also not used by `hash`. Global training
++`seed` initializes fixed hash projections/regions and learned parameters;
++save and evaluate the complete checkpoint and its config.
++
++## Selection, updates, and reads
++
++The usual learned HEPT coordinate augmentation produces q_hat and k_hat.
++The kernel remains `K(x,y) = exp(-0.5 * ||x-y||^2)`.
++
++1. Apply the existing HEPT E2LSH projection, coordinate quantile regions and
++   geographic hash shifts. Sort augmented queries and keys separately for
++   each table and head, then split each sorted list into fixed-size blocks.
++   Query block b reads key block b, as in the existing HEPT implementation.
++2. Preserve selected block membership, but sort the keys inside each block by
++   the configured event rank. Values and beta follow their keys. Each key block
++   starts with empty memory; memory does not carry across blocks or tables.
++3. Solve the exact Gaussian delta recurrence for the selected keys. Read that
++   memory at each selected query, masking keys by their original event ranks.
++4. For bidirectional mode, also solve with reversed key order and use the
++   reverse causal read mask. Sum the two outputs. Restore query order and take
++   the arithmetic mean across tables before the existing output projection.
++
++For table r and block b, the forward equations are:
++
++```text
++u_j^(r,b) = beta_j * (v_j - sum_{l in key_block(r,b), rank(l)<rank(j)}
++                                  K(k_hat_j,k_hat_l) * u_l^(r,b))
++o_i^(r) = sum_{j in selected_key_block(r,i), rank(j)<=rank(i)}
++               K(q_hat_i,k_hat_j) * u_j^(r,b)
++```
++
++Reverse updates use descending ranks and reverse reads use `rank(j)>=rank(i)`.
++When a point's own key is selected, its write is included in both directions,
++matching the inherited full DeltaNet bidirectional convention. Separate
++query/key hash sorts can place a point's own key outside its selected block;
++the backend does not force an additional self edge.
++
++A triangular mask based on query/key *positions within hash blocks* would be
++incorrect: those permutations differ. The implementation uses rank comparisons
++for reads and a triangular key-key system only after sorting keys by rank.
++
++Tables have separate residual writes. A key appearing in multiple tables is
++an ensemble contribution, not a duplicated edge in one shared recurrence;
++there is no edge deduplication across tables. Averaging tables makes duplicating
++an identical table leave the output unchanged. HEPT's normalized attention
++mass merge does not apply to these unnormalized delta outputs.
++
++## Exactness and resource use
++
++Kernel values and delta updates within each bucket are exact to floating-point
++precision. With one bucket containing every real point, each table matches
++the full exact backend in both directions, including gradients. With multiple
++buckets, it is a different, localized recurrence: there is no global state or
++cross-bucket residual prediction. It is also different from a single global
++recurrence with arbitrarily masked edges. No equivalence to the HEPT paper's
++normalized attention or its benchmark scores is claimed.
++
++Hash/region selection is discrete and runs without gradients, as in HEPT.
++Selected Gaussian values still backpropagate to projected q/k, coordinates,
++coordinate weights, values and beta. Hash projections and region parameters
++are fixed per layer and stored in checkpoints. The original HEPT comparison
++uses its own existing geographic-region setup; models do not share hash banks.
++
++There are approximately R*H*N*B pairwise kernel entries instead of H*N*N;
++sorting still costs time. For fixed block size B and number of tables R,
++kernel work scales linearly with event length N. Exact triangular solves and
++their gradients cost more as B increases. Groups bound temporary matrices to
++`[heads, chunk_buckets, B, B]`, per table. With H=8, chunk_buckets=64, B=100,
++one float32 matrix in a group is about 19.5 MiB; this is not total peak memory.
++
++Checkpointing trades recomputation for lower saved activation memory; disabling
++it retains bucket kernel/solve intermediates across the event. Gathered
++features, outputs, permutations, other model layers and their gradients still
++grow with N. Decreasing work-group size reduces temporary allocations but
++increases Python/GPU launch overhead. Increasing block size can recover more
++neighbors but increases memory and compute. No fused sparse GPU kernel is
++provided; CUDA performance and full-model 60k training memory are unmeasured.
++
++The full-event exact size guard does not apply, but choosing a block size as
++large as an event recreates dense costs. Padding is hashed only after real-point
++selection, has zero beta, and is excluded from reads; fully empty key blocks
++produce zero output. Hash/region buffers must be loaded from checkpoints to
++reproduce evaluation. Checkpoints from other backends are incompatible with
++strict loading into `hash`; train a new run or explicitly manage partial loading.
++
++## Validation
++
++Tests compare outputs and q/k/v/beta gradients to independent sequential
++residual writes with direct squared distances; verify HEPT block membership;
++compare padded single-bucket layers to full exact layers and their coordinate
++and RPE gradients; check multiple tables, separate query/key ordering, work
++grouping, recomputation, activation checkpointing and checkpoint restoration.
++A synthetic 60,000-point event checks that every kernel matrix stays at most
++16 by 16 in its pairwise dimensions. This is a small-model CPU forward check,
++not a full training benchmark. Offline tracking and pileup smoke training
++exercise the new backend. Real-data accuracy and GPU performance remain to be
++measured.
++
++The complete suite passed 28 tests, and all eight offline task/mixer training
++paths completed. Saved hash-backend checkpoints reproduced all 10 tracking
++test metrics and all four pileup test metrics within 1e-7 after strict loading.
++
++Implementation: `src/models/attention/hept_delta_hash.py`, dispatched by
++`DeltaNetAttention` in `src/models/attention/deltanet.py`.
+diff --git a/docs/HEPT_KERNEL_DELTANET.md b/docs/HEPT_KERNEL_DELTANET.md
+new file mode 100644
+index 0000000..1102c23
+--- /dev/null
++++ b/docs/HEPT_KERNEL_DELTANET.md
+@@ -0,0 +1,188 @@
++# DeltaNet using the HEPT kernel
++
++## What changed from the first handoff
++
++The original `DeltaNetAttention` used coordinates to sort points, then applied
++a delta rule to its activated/L2-normalized query and key vectors. The Gaussian
++kernel existed only in the separate HEPT attention module. It was not used by
++DeltaNet. This update implements the clarified request.
++
++The new option remains `model_name: trans_deltanet`, with
++`model_kwargs.deltanet_kernel: hept`. It does not call HEPT LSH attention.
++The backbone's feature encoder, residual/FFN blocks, heads, tasks and transforms
++are kept. DeltaNet now receives `w_rpe`, giving it the same positive learned
++coordinate-weight parameterization as HEPT.
++
++## Mathematical target
++
++Augment the projected queries and keys with coordinates:
++
++```text
++q_hat_t = [q_t, sqrt(2*omega) * coords_t]
++k_hat_t = [k_t, sqrt(2*omega) * coords_t]
++k_HEPT(x,y) = exp(-0.5 * ||x-y||^2)
++```
++
++The delta rule in the Gaussian reproducing kernel Hilbert space (RKHS) is:
++
++```text
++S_t = S_(t-1) + beta_t * phi(k_hat_t) *
++      (v_t - S_(t-1)^T phi(k_hat_t))^T
++o_t = S_t^T phi(q_hat_t)
++```
++
++This learns an associative memory with error-correcting writes. It is not the
++row-normalized Gaussian weighted average computed by HEPT attention. Keeping
++DeltaNet means keeping these residual writes, causal dependence within a scan,
++and the configured bidirectional combination. The inherited bidirectional
++mode sums independent forward and reverse scan outputs, including the current
++point in both scans.
++
++The equivalent exact dual recurrence is:
++
++```text
++u_t = beta_t * (v_t - sum_(j<t) k_HEPT(k_hat_t,k_hat_j) * u_j)
++o_t = sum_(j<=t) k_HEPT(q_hat_t,k_hat_j) * u_j
++```
++
++`hept_delta_kernel.py` implements this via a triangular solve. The output and
++query/key/value/beta gradients are tested against an independent sequential
++kernel recurrence using direct squared differences.
++
++## Backends
++
++| Setting | Exactness | Cost and use |
++| --- | --- | --- |
++| `deltanet_hept_backend: exact` | Exact Gaussian kernel in the dual delta rule, to floating-point precision | Quadratic matrices in event length; default limit 1024 points; small-event reference/debugging |
++| `deltanet_hept_backend: rff` | Finite random Fourier approximation to the same Gaussian kernel | Finite recurrent state; intended full-event training path |
++| `deltanet_hept_backend: hash` | Exact Gaussian values and delta updates within HEPT-selected buckets | Independent local memories; approximately R*H*N*B kernel entries; see [HASH_KERNEL_DELTANET.md](HASH_KERNEL_DELTANET.md) |
++
++For the scalable path, with m random frequencies per head:
++
++```text
++W[:,j] ~ Normal(0,I)
++phi(x) = [cos(xW), sin(xW)] / sqrt(m)
++feature_dim = 2*m
++E[phi(x)^T phi(y)] = k_HEPT(x,y)
++```
++
++Every realized feature vector has norm one. This preserves the bounded-key
++condition of the delta update, with beta in (0,1) by default. Raw augmented
++queries/keys are not L2-normalized, and no SiLU/ReLU is applied; doing either
++would change the desired Gaussian kernel. The base delta implementation's
++feature-dimension query scaling is explicitly canceled for this option so the
++read/write interactions approximate k_HEPT itself rather than k_HEPT/sqrt(D).
++
++Frequencies are fixed registered buffers, use a local deterministic generator,
++move with the model and are saved in checkpoints. Coordinate weights and the
++query/key/value projections are learned. This is a finite-feature approximation
++of a Gaussian-kernel DeltaNet, not an exact finite-dimensional representation of
++the Gaussian kernel on unrestricted inputs.
++
++## Options and commands
++
++```yaml
++model_name: trans_deltanet
++model_kwargs:
++  deltanet_kernel: hept
++  deltanet_hept_backend: rff
++  deltanet_kernel_features: 128  # even total dimension: 64 cosine + 64 sine
++  deltanet_kernel_seed: 0
++  deltanet_qk_activation: identity
++  deltanet_qk_norm: none
++  deltanet_impl: torch
++  num_w_per_dist: 10
++  # keep the usual h_dim, num_heads, n_layers, beta, order and direction options
++```
++
++The CLI `--kernel deltanet-hept` sets the kernel, identity activation, no
++pre-feature normalization, and PyTorch backend. Explicit `-o` overrides run
++last; incompatible settings are rejected rather than silently changing the
++kernel. Switching back with `--kernel deltanet` sets the standard kernel; use
++a standard DeltaNet config to recover its usual activation/normalization too.
++
++```bash
++# Offline fixture tests
++python scripts/make_synthetic_tracking.py
++python train.py --config configs/tracking/deltanet_hept_smoke.yaml --kernel deltanet-hept -o device=cpu
++
++# Exact kernel reference on those small fixture events
++python train.py --config configs/tracking/deltanet_hept_smoke.yaml --kernel deltanet-hept -o model_kwargs.deltanet_hept_backend=exact -o device=cpu
++
++# Full benchmark, feature-budget experiment
++python train.py --config configs/tracking/deltanet_hept_tracking-60k.yaml --kernel deltanet-hept -o model_kwargs.deltanet_kernel_features=256
++```
++
++The exact guard can be changed with `deltanet_hept_exact_max_points`, but full
++60k-event dense matrices are impractical. `max_events` limits event count, not
++points per event, and does not make the exact backend safe on real full events.
++
++The new kernel path currently requires `deltanet_impl: torch`. The inherited FLA
++adapter was not verified for the expanded feature dimension and kernel scaling.
++The PyTorch path can run on CUDA but local validation is CPU-only. Float32 is
++the recommended initial precision; mixed precision was not validated.
++
++Old standard-DeltaNet checkpoints lack coordinate weights and frequency
++buffers. Train a new experiment; a strict load into the new model should fail.
++Use the saved config, same feature dimension and backend for kernel checkpoint
++evaluation. Standard DeltaNet's model parameter names remain unchanged.
++
++## Performance hypotheses and priorities
++
++The reported old scores were 0.6250 tracking-6k, 0.7080 tracking-60k and 0.3667
++pileup. These alone do not establish which mixer was run or why it underperformed.
++Inspect the saved model_name, complete model_kwargs, epochs, validation curve,
++feature normalization, dataset splits and checkpoint selection first.
++
++1. Run standard DeltaNet and Gaussian-kernel DeltaNet on identical data/splits,
++   backbone dimensions, loss, order, direction, seed and training budget.
++   The Gaussian model adds learned coordinate weights and a larger memory state;
++   report parameter count, state dimension, peak memory and runtime alongside
++   validation performance. A secondary linear-feature/no-activation ablation
++   separates changing the old activation from introducing geometry.
++2. On small real events or consistently constructed subclouds, compare the exact
++   Gaussian delta rule with the RFF path using 128, 256, 512 and 1024 features.
++   Measure error on the kernel values and on complete delta outputs: good pairwise
++   approximation does not by itself guarantee good recurrent outputs.
++3. RFF errors can be large relative to very small true Gaussian weights and can
++   produce negative approximate off-diagonal similarities. These are properties
++   of the approximation, not physical negative Gaussian weights. Do not clamp
++   the pairwise approximations inside the recurrent state: that would break the
++   finite-feature delta rule. Increase features and inspect errors first.
++4. Sweep learning rate on validation: tracking 1e-3 and 1e-2, pileup 1e-4 and
++   1e-3. These are the HEPT paper's ranges, not proven best values for this new
++   hybrid. Monitor learned coordinate coefficients for over-localization and
++   high-variance phase gradients. The exact initialization is inherited from
++   HEPT; alternatives should be explicit ablations.
++5. Compare the new `hash` backend with exact and RFF on matched small events,
++   then evaluate hash-local memories on full events. It evaluates selected
++   Gaussian values exactly but resets memory across buckets and tables. The
++   HEPT paper motivates LSH over global RFF for strongly local large point clouds;
++   this new delta-rule variant still needs its own accuracy measurement.
++
++A separate config issue was found while reviewing the original comparison:
++`hept_tracking-6k.yaml` inherited `num_regions: 150`, whereas Appendix C.2 of the
++paper tunes 10/15/20 for tracking-6k. This update uses 15 for the **pure HEPT
++comparison** and its fallback. Tracking-60k keeps 150 and pileup keeps 140. The
++midpoint is a starting setting from the reported range, not a verified optimum.
++The new hash backend also uses these region counts; RFF and full exact do not.
++
++## Validation
++
++Twenty unit tests passed after this addition. New tests cover exact Gaussian
++kernel recurrence and gradients, unit-norm features, translation invariance,
++approximation against exact kernels and complete delta outputs, coordinate/RPE
++backpropagation, activation checkpointing, checkpoint buffers and size/config
++guards. End-to-end synthetic training and saved-checkpoint evaluation cover
++both tasks and both Gaussian-kernel backends. No full dataset or GPU experiment
++has been run, so no improvement over the user's scores is claimed.
++
++The later hash-backend addition expands this to 28 unit tests and adds offline
++training on both tasks. See [HASH_KERNEL_DELTANET.md](HASH_KERNEL_DELTANET.md)
++for the new recurrence, checks and the bounded-matrix 60k synthetic forward test.
++
++## References
++
++- HEPT kernel and approximation analysis: https://arxiv.org/abs/2402.12535
++- DeltaNet delta rule: https://arxiv.org/abs/2406.06484
++- Finite Fourier features: Rahimi and Recht (2007), discussed in HEPT Section 2.
+diff --git a/docs/ORIGINAL_README.md b/docs/ORIGINAL_README.md
+new file mode 100644
+index 0000000..8730d02
+--- /dev/null
++++ b/docs/ORIGINAL_README.md
+@@ -0,0 +1,161 @@
++# DeltaNet on the HEPT backbone
++
++An **apples-to-apples** study that drops the [DeltaNet](https://arxiv.org/abs/2406.06484)
++linear-attention layer into the [HEPT](https://arxiv.org/abs/2402.12535)
++point-transformer backbone for high-energy-physics point clouds, keeping
++*everything else identical* (feature encoder, residual blocks, feed-forward,
++layer concatenation, task heads, losses, and preprocessing). The only thing that
++changes between HEPT and DeltaNet is the **token-mixing mechanism**.
++
++The motivating research question: linear transformers are **not
++permutation-equivariant** — they are sequence models — but a point cloud has no
++intrinsic order. How do we inject *locality* so a linear transformer can compete
++with HEPT's LSH-based local attention? We start with the simplest lever —
++**sorting the points** by a geometric/kinematic key — and build toward
++space-filling curves and local grouping (see [`docs/LOCALITY.md`](docs/LOCALITY.md)).
++
++---
++
++## What changed vs. the original HEPT code
++
++This repo vendors the HEPT backbone (`src/`) essentially verbatim and adds:
++
++| File | Purpose |
++|------|---------|
++| `src/models/attention/deltanet.py` | **New.** DeltaNet token-mixer (pure-PyTorch chunkwise + recurrent), point-ordering, optional `fla` GPU kernel. |
++| `src/models/baselines/transformer.py` | 3 small edits: register `deltanet` in `Attn`, keep the flat point layout for it in `prepare_input`, thread `pt` through for pt/kt sort keys. |
++| `src/models/attention/__init__.py` | Optional imports so DeltaNet+HEPT work without the other baselines' heavy deps. |
++| `src/run.py` | **New.** Unified train/test runner (both tasks), structured logging, no `nni`. |
++| `src/utils/run_logger.py` | **New.** Human `run.log` + machine `metrics.jsonl` + `config.yaml` dump. |
++| `configs/` | DeltaNet + HEPT configs for tracking-6k/60k and pileup, plus tiny smoke configs. |
++| `scripts/`, `tests/` | Smoke test, sort-key sweep, subset makers, correctness tests. |
++
++The DeltaNet layer has the **same I/O contract** as `HEPTAttention`
++(`forward(q, k, v, **kwargs) -> [N, h_dim]`), so the swap is genuinely local.
++
++---
++
++## Tasks & data
++
++Two HEPT benchmarks, same backbone:
++
++* **tracking** — InfoNCE metric learning on tracker hits; metric `accuracy@0.9`.
++* **pileup** — per-node binary classification; metric `auc` (average precision).
++
++Datasets are the preprocessed releases from the HEPT paper
++([Zenodo record 10694703](https://zenodo.org/records/10694703)). Download them
++fresh:
++
++```bash
++python scripts/download_data.py --dataset pileup        # ~1.8 GB zip -> 11 GB
++python scripts/download_data.py --dataset tracking-6k   # ~2.5 GB zip -> 66 GB
++python scripts/download_data.py --dataset tracking-60k  # ~0.4 GB zip -> 60 GB
++```
++
++> **Memory note.** PyG's `InMemoryDataset` loads the *entire* processed `.pt`
++> into RAM. The tracking files are ~60–66 GB. Do real training on a box with
++> enough RAM/GPU. For quick local iteration use `scripts/make_subset.py`
++> (a one-time full load to carve a small subset) or the synthetic smoke data.
++
++### Low-RAM streaming (sharded dataset)
++
++To avoid the full in-RAM load entirely, re-shard the monolithic file into one
++small file per event and load lazily (RAM then scales with the DataLoader batch,
++not the dataset). Behaviour is **identical** — same splits, dims, and per-event
++tensors (verified by `tests/test_sharded_equivalence.py`, and training
++reproduces the same numbers bit-for-bit).
++
++```bash
++# one-time conversion (loads the source once; source is NOT modified/deleted):
++python scripts/shard_dataset.py --dataset tracking-6k --src_data_dir data --out_root data_sharded
++# then train against the shards:
++cd src && python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml \
++                        -o data_dir=../data_sharded -o use_sharded=true
++```
++
++Set `use_sharded: true` + `data_dir: data_sharded` in a config to make it the
++default. With shards you can also safely use `num_workers>0` in the DataLoader.
++
++Preprocessing is **unchanged** from HEPT (same transforms, same features).
++
++---
++
++## Install
++
++The dev box uses a venv layered on the base conda env (torch 1.13 + pyg 2.3):
++
++```bash
++python -m venv --system-site-packages .venv
++.venv/bin/pip install einops "torchmetrics==0.11.4" fvcore
++```
++
++For GPU training with the fast `fla` Triton kernels, additionally
++`pip install flash-linear-attention` and set `deltanet_impl: auto` (or `fla`).
++
++---
++
++## Quick start
++
++```bash
++# 1. Verify the DeltaNet math + run tiny end-to-end smoke tests (CPU-safe):
++bash scripts/smoke_test.sh
++
++# 2. Train on a real benchmark (GPU box):
++cd src
++python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml
++python run.py --config ../configs/pileup/deltanet_pileup.yaml
++
++# 3. Evaluate a checkpoint:
++python run.py --config ../configs/tracking/deltanet_tracking-6k.yaml \
++              --mode test --ckpt ../logs/<run>/best_model.pt
++
++# 4. HEPT baseline (identical backbone) for comparison:
++python run.py --config ../configs/tracking/hept_tracking-6k.yaml
++
++# 5. Sweep the locality order (sort key x direction):
++bash scripts/sweep_sortings.sh configs/tracking/deltanet_tracking-6k.yaml
++```
++
++Any config value can be overridden on the CLI:
++`-o model_kwargs.deltanet_sort_key=phi -o num_epochs=50 -o max_events=100`.
++
++---
++
++## DeltaNet knobs (`model_kwargs`)
++
++| key | values | meaning |
++|-----|--------|---------|
++| `deltanet_sort_key` | `eta` `phi` `r` `pt` `kt` `original` | the 1-D order the delta rule scans (locality lever) |
++| `deltanet_direction` | `bi` `uni` | bidirectional (forward+backward, non-causal) or single causal scan |
++| `chunk_size` | int | chunkwise kernel block; also an implicit local window |
++| `deltanet_qk_norm` | `l2` `none` | L2-normalize q,k (stability of the delta update) |
++| `deltanet_qk_activation` | `silu` `relu` `identity` | q,k feature map |
++| `deltanet_use_beta` | bool | learn per-point write strength `beta` (else 1) |
++| `deltanet_allow_neg_eigval` | bool | scale `beta` by 2 (allows negative eigenvalues) |
++| `deltanet_impl` | `auto` `torch` `fla` | kernel backend; `auto` uses `fla` on CUDA if installed |
++
++> On the tracking task, `pt`/`kt` sort keys feed a weak pt signal into ordering,
++> which HEPT does not use — a slightly different setup, flagged in the logs.
++> Default is `eta` (pure geometry).
++
++---
++
++## Logs
++
++Every run writes `logs/<stamp>_<model>_<dataset>_<seed>_<note>/`:
++
++* `run.log` — human-readable, timestamped.
++* `metrics.jsonl` — one JSON record per event (`kind ∈ {meta,epoch,final}`); load with `pandas.read_json(path, lines=True)`.
++* `config.yaml` — exact resolved config.
++* `best_model.pt` — best checkpoint by the main metric.
++
++See [`AGENTS.md`](AGENTS.md) for the repo map and conventions (for coding agents),
++and [`DEVLOG.md`](DEVLOG.md) for the running development log.
++
++---
++
++## References
++
++* Miao et al., *LSH-Based Efficient Point Transformer (HEPT)*, ICML 2024. https://arxiv.org/abs/2402.12535
++* Yang et al., *Parallelizing Linear Transformers with the Delta Rule over Sequence Length (DeltaNet)*, 2024. https://arxiv.org/abs/2406.06484
++* `flash-linear-attention`: https://github.com/fla-org/flash-linear-attention
+diff --git a/requirements.txt b/requirements.txt
+index ec23a4a..457e4f5 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,12 +1,17 @@
+-# Layer these on top of an env that already has torch + torch_geometric
+-# (dev box: base conda torch 1.13.1 + pyg 2.3.1). See README for the venv recipe.
+-einops
++# Install torch + compiled PyG extensions first: see README.md.
++torch_geometric==2.6.1
++einops>=0.7,<0.9
+ torchmetrics==0.11.4
+-fvcore
+-# GPU only, for the fast DeltaNet kernel (deltanet_impl: auto|fla):
+-# flash-linear-attention
+-#
+-# Provided by the base conda env on the dev box (listed for a fresh install):
+-#   torch>=1.13  torch_geometric>=2.3  torch_scatter  torch_cluster
+-#   numpy  pandas  scipy  scikit-learn  numba  pyyaml  tqdm  tensorboard
+-#   uproot  awkward   # (pileup raw processing only)
++fvcore==0.1.5.post20221221
++numpy>=1.24,<3
++pandas>=1.5,<4
++scipy>=1.10,<2
++scikit-learn>=1.2,<2
++numba>=0.58,<0.69
++PyYAML>=6,<7
++tqdm>=4.65,<5
++tensorboard>=2.12,<3
++joblib>=1.2,<2
++pytest>=7,<10
++# uproot and awkward are optional, only for raw ROOT preprocessing.
++# flash-linear-attention is optional for CUDA DeltaNet; HEPT does not use it.
+diff --git a/scripts/make_synthetic_pileup.py b/scripts/make_synthetic_pileup.py
+new file mode 100644
+index 0000000..9a18145
+--- /dev/null
++++ b/scripts/make_synthetic_pileup.py
+@@ -0,0 +1,43 @@
++"""Generate small deterministic pileup fixtures; no downloads or ROOT needed."""
++import argparse
++from pathlib import Path
++
++import numpy as np
++import torch
++from torch_geometric.data import Data, InMemoryDataset
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out_root", default=str(Path(__file__).resolve().parents[1] / "data" / "pileup_smoke"))
++    ap.add_argument("--n_events", type=int, default=12)
++    ap.add_argument("--seed", type=int, default=0)
++    args = ap.parse_args()
++    if args.n_events < 6:
++        ap.error("--n_events must be at least 6")
++    g = torch.Generator().manual_seed(args.seed)
++    events = []
++    for i in range(args.n_events):
++        n = 47 + i % 9  # nonmultiples of the attention block size
++        pos = torch.randn(n, 2, generator=g)
++        x = torch.randn(n, 8, generator=g)
++        x[:, -1] = torch.randint(0, 7, (n,), generator=g).float()
++        y = (torch.arange(n) % 4 == 0).long()
++        x[:, 2] += y * 0.5
++        events.append(Data(x=x, pos=pos, y=y, is_neu=torch.ones(n, dtype=torch.bool),
++                           edge_index=torch.empty(2, 0, dtype=torch.long)))
++    data, slices = InMemoryDataset.collate(events)
++    n_train = int(args.n_events * 0.6)
++    n_valid = (args.n_events - n_train) // 2
++    ids = np.arange(args.n_events)
++    split = dict(train=ids[:n_train], valid=ids[n_train:n_train+n_valid], test=ids[n_train+n_valid:])
++    out = Path(args.out_root) / "pileup" / "processed"
++    out.mkdir(parents=True, exist_ok=True)
++    torch.save((data, slices, split), out / "data.pt")
++    for name in ("pre_filter.pt", "pre_transform.pt"):
++        torch.save(None, out / name)
++    print(f"Wrote {args.n_events} synthetic pileup events to {out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/make_synthetic_tracking.py b/scripts/make_synthetic_tracking.py
+index 8eb9b1d..d4c0ecc 100644
+--- a/scripts/make_synthetic_tracking.py
++++ b/scripts/make_synthetic_tracking.py
+@@ -85,6 +85,9 @@ def main():
+     ap.add_argument("--seed", type=int, default=0)
+     args = ap.parse_args()
+ 
++    if args.n_events < 10:
++        ap.error("--n_events must be at least 10 so all tracking splits are nonempty")
++    torch.manual_seed(args.seed)
+     rng = np.random.default_rng(args.seed)
+     data_list = []
+     for i in range(args.n_events):
+diff --git a/scripts/smoke_test.sh b/scripts/smoke_test.sh
+index 0407ddc..1414d41 100644
+--- a/scripts/smoke_test.sh
++++ b/scripts/smoke_test.sh
+@@ -1,34 +1,21 @@
+ #!/usr/bin/env bash
+-# End-to-end CPU smoke test: verifies the DeltaNet math, then trains+tests tiny
+-# models on both tasks. Safe to run on the dev box (no GPU, low memory).
++# Offline CPU checks on synthetic fixtures. Every failure propagates.
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+-PY=.venv/bin/python
+-
+-echo "==================================================================="
+-echo "[1/4] DeltaNet math correctness (chunkwise == recurrence)"
+-echo "==================================================================="
+-$PY tests/test_deltanet_correctness.py
+-
+-echo "==================================================================="
+-echo "[2/4] Ensure synthetic tracking data exists + sharded==in-memory check"
+-echo "==================================================================="
+-if [ ! -f data/tracking_smoke/tracking/processed/tracking-6k/data-6k.pt ]; then
+-  $PY scripts/make_synthetic_tracking.py
++PY="${PYTHON:-.venv/bin/python}"
++if [ ! -x "$PY" ] && ! command -v "$PY" >/dev/null 2>&1; then
++  printf 'Python not found: %s. Set PYTHON=python or create .venv.\n' "$PY" >&2
++  exit 1
+ fi
+-$PY tests/test_sharded_equivalence.py 2>&1 | grep -E "PASS|SHARDED|MISMATCH" || true
+-
+-cd src
+-echo "==================================================================="
+-echo "[3/4] Tracking (InfoNCE) smoke: DeltaNet, then HEPT baseline"
+-echo "==================================================================="
+-../$PY run.py --config ../configs/tracking/deltanet_smoke.yaml 2>&1 | grep -E "epoch|DONE|param|device" || true
+-../$PY run.py --config ../configs/tracking/hept_smoke.yaml     2>&1 | grep -E "epoch|DONE|param|device" || true
+-
+-echo "==================================================================="
+-echo "[4/4] Pileup (classification) smoke: DeltaNet on real data (4 events)"
+-echo "==================================================================="
+-../$PY run.py --config ../configs/pileup/deltanet_smoke.yaml   2>&1 | grep -E "epoch|DONE|param|device" || true
+-
+-echo ""
+-echo "SMOKE TEST COMPLETE. Logs in ./logs/"
++"$PY" -m pytest -q tests
++"$PY" scripts/make_synthetic_tracking.py
++"$PY" scripts/make_synthetic_pileup.py
++"$PY" tests/test_sharded_equivalence.py
++for task in tracking pileup; do
++  for experiment in deltanet hept deltanet_hept deltanet_hept_hash; do
++    kernel="${experiment//_/-}"
++    if [ "$experiment" = deltanet_hept_hash ]; then kernel=deltanet-hept; fi
++    "$PY" train.py --config "configs/$task/${experiment}_smoke.yaml" --kernel "$kernel" -o device=cpu
++  done
++done
++printf '\nSMOKE TEST COMPLETE. Logs in ./logs/\n'
+diff --git a/src/datasets/pileup.py b/src/datasets/pileup.py
+index 8b1279d..48fc519 100644
+--- a/src/datasets/pileup.py
++++ b/src/datasets/pileup.py
+@@ -4,8 +4,6 @@ sys.path.append("../")
+ 
+ import os
+ import shutil
+-import uproot
+-import awkward as ak
+ import os.path as osp
+ from tqdm import tqdm
+ from joblib import Parallel, delayed
+@@ -31,7 +29,7 @@ class Pileup(InMemoryDataset):
+         set_seed(seed)
+         self.url_processed = "https://zenodo.org/records/10694703/files/pileup-10k-processed.zip"
+         super(Pileup, self).__init__(root, transform, pre_transform)
+-        self.data, self.slices, self.idx_split = torch.load(self.processed_paths[0])
++        self.data, self.slices, self.idx_split = torch.load(self.processed_paths[0], weights_only=False)
+         self.x_dim = self._data.x.shape[1]
+         self.coords_dim = 2 + 2
+ 
+@@ -53,8 +51,7 @@ class Pileup(InMemoryDataset):
+             os.unlink(path)
+         else:
+             print("Stop downloading.")
+-            shutil.rmtree(self.root)
+-            exit(-1)
++            raise RuntimeError("Dataset download declined; existing files were preserved")
+ 
+     def process(self):
+         train_data = prepare_dataset(self.raw_paths[0])
+@@ -79,6 +76,7 @@ class Pileup(InMemoryDataset):
+ 
+ 
+ def prepare_dataset(datadir):
++    import uproot  # needed only for raw ROOT preprocessing
+     features = [
+         "PF/PF.PT",
+         "PF/PF.Eta",
+@@ -101,6 +99,7 @@ def prepare_dataset(datadir):
+ 
+ 
+ def process_one_event(event):
++    import awkward as ak
+     nparticles = len(event["PF/PF.PT"])
+ 
+     pt = ak.to_numpy(event["PF/PF.PT"])
+diff --git a/src/datasets/sharded.py b/src/datasets/sharded.py
+index 22f804c..eb8284f 100644
+--- a/src/datasets/sharded.py
++++ b/src/datasets/sharded.py
+@@ -41,7 +41,7 @@ class ShardedPointDataset(Dataset):
+                 f"No shards found at {self._shard_dir}. Create them with "
+                 f"`python scripts/shard_dataset.py --dataset {dataset_name} ...`"
+             )
+-        meta = torch.load(meta_path)
++        meta = torch.load(meta_path, weights_only=False)
+         self.idx_split = meta["idx_split"]
+         self.x_dim = meta["x_dim"]
+         self.coords_dim = meta["coords_dim"]
+@@ -66,4 +66,4 @@ class ShardedPointDataset(Dataset):
+ 
+     def get(self, idx):
+         # returns the pre-transform Data; base __getitem__ applies self.transform
+-        return torch.load(self._shard_dir / f"evt_{int(idx):06d}.pt")
++        return torch.load(self._shard_dir / f"evt_{int(idx):06d}.pt", weights_only=False)
+diff --git a/src/datasets/tracking.py b/src/datasets/tracking.py
+index ddac8b6..a80a644 100644
+--- a/src/datasets/tracking.py
++++ b/src/datasets/tracking.py
+@@ -82,7 +82,7 @@ class Tracking(InMemoryDataset):
+         )
+ 
+         super(Tracking, self).__init__(str(root), transform=kwargs.get("transform", None), pre_transform=None)
+-        self.data, self.slices, self.idx_split = torch.load(self.processed_paths[0])
++        self.data, self.slices, self.idx_split = torch.load(self.processed_paths[0], weights_only=False)
+         self.idx_split = get_new_idx_split(self)
+         self.x_dim = self._data.x.shape[1] + 1
+         self.coords_dim = 2 + 4
+@@ -115,8 +115,7 @@ class Tracking(InMemoryDataset):
+             os.unlink(path)
+         else:
+             print("Stop downloading.")
+-            shutil.rmtree(self.root)
+-            exit(-1)
++            raise RuntimeError("Dataset download declined; existing files were preserved")
+ 
+     def process(self):
+         all_point_clouds = os.listdir(self.raw_dir)
+@@ -138,7 +137,7 @@ class Tracking(InMemoryDataset):
+ 
+     def process_point_cloud(self, point_cloud):
+         evtid, sector = get_event_id_sector_from_str(point_cloud)
+-        data = torch.load(self.raw_dir / point_cloud)
++        data = torch.load(Path(self.raw_dir) / point_cloud, weights_only=False)
+         df = get_dataframe(data, evtid, self.feature_names)
+ 
+         eta = calc_eta(df.r, df.z)
+diff --git a/src/models/attention/deltanet.py b/src/models/attention/deltanet.py
+index 7b86b51..fda4b88 100644
+--- a/src/models/attention/deltanet.py
++++ b/src/models/attention/deltanet.py
+@@ -39,6 +39,9 @@ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
+ from einops import rearrange
++from .hept import prep_qk
++from .hept_delta_kernel import GaussianFourierFeatures, kernel_delta_rule
++from .hept_delta_hash import HashBucketGaussianDelta
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -51,9 +54,9 @@ from einops import rearrange
+ #
+ # NOTE on leakage: for the *tracking* task ``pt`` is also used to define the
+ # evaluation point filter. Ordering the sequence by ``pt``/``kt`` feeds a weak
+-# signal about pt into the model. This is physically legitimate (pt is a real
+-# per-hit feature) but is a *different* experimental setup than HEPT, which does
+-# not consume pt. Default sort key is therefore ``eta`` (pure geometry); pt-based
++# signal about pt into the model. In simulated tracking, true pt may be ground-truth metadata
++# unavailable before reconstruction. Using it risks information leakage and is
++# a different experimental setup than HEPT, which does not consume pt. Default sort key is therefore ``eta`` (pure geometry); pt-based
+ # keys are opt-in and flagged in the config/logs.
+ 
+ def _sort_key_values(coords: torch.Tensor, pt, sort_key: str) -> torch.Tensor:
+@@ -192,9 +195,13 @@ class DeltaNetAttention(nn.Module):
+         deltanet_use_beta (bool)    : learn per-point beta (else beta=1)
+         deltanet_allow_neg_eigval   : scale beta by 2 (allows negative eigenvalues)
+         deltanet_impl (str)         : "auto" | "torch" | "fla"
++        deltanet_kernel (str)       : "standard" | "hept"
++        deltanet_hept_backend (str) : "rff" | "exact" | "hash" (local exact buckets)
++        deltanet_kernel_features   : even total Fourier feature dimension
++        deltanet_kernel_seed       : fixed frequency bank seed, saved in state_dict
+     """
+ 
+-    def __init__(self, **kwargs):
++    def __init__(self, coords_dim=None, **kwargs):
+         super().__init__()
+         self.dim_per_head = kwargs["h_dim"]
+         self.num_heads = kwargs["num_heads"]
+@@ -207,6 +214,37 @@ class DeltaNetAttention(nn.Module):
+         self.use_beta = kwargs.get("deltanet_use_beta", True)
+         self.allow_neg_eigval = kwargs.get("deltanet_allow_neg_eigval", False)
+         self.impl = kwargs.get("deltanet_impl", "auto")
++        self.kernel = kwargs.get("deltanet_kernel", "standard")
++        self.hept_backend = kwargs.get("deltanet_hept_backend", "rff")
++        self.kernel_features = kwargs.get("deltanet_kernel_features", 128)
++        self.num_w_per_dist = kwargs.get("num_w_per_dist", 10)
++        self.exact_max_points = kwargs.get("deltanet_hept_exact_max_points", 1024)
++        if self.kernel not in ("standard", "hept"):
++            raise ValueError("deltanet_kernel must be standard or hept")
++        if self.hept_backend not in ("rff", "exact", "hash"):
++            raise ValueError("deltanet_hept_backend must be rff, exact or hash")
++        if self.chunk_size < 1:
++            raise ValueError("chunk_size must be positive")
++        if self.kernel == "hept":
++            if coords_dim is None or coords_dim < 2:
++                raise ValueError("HEPT-kernel DeltaNet needs coords_dim >= 2")
++            if self.impl != "torch":
++                raise ValueError("HEPT-kernel DeltaNet currently requires deltanet_impl=torch")
++            # SiLU/ReLU or L2 normalization of augmented q/k changes the target
++            # Gaussian. RFF itself is already unit norm; disallow silent changes.
++            if self.qk_activation != "identity" or self.qk_norm != "none":
++                raise ValueError("HEPT kernel requires deltanet_qk_activation=identity and deltanet_qk_norm=none")
++            if self.hept_backend == "rff":
++                self.kernel_map = GaussianFourierFeatures(self.num_heads, self.dim_per_head + coords_dim,
++                                                          self.kernel_features,
++                                                          kwargs.get("deltanet_kernel_seed", 0))
++            elif self.hept_backend == "hash":
++                self.hash_delta = HashBucketGaussianDelta(
++                    self.num_heads, self.dim_per_head + coords_dim,
++                    block_size=kwargs.get("block_size", 100), n_hashes=kwargs.get("n_hashes", 3),
++                    num_regions=kwargs.get("num_regions", 15),
++                    chunk_buckets=kwargs.get("deltanet_hash_chunk_buckets", 64),
++                    checkpoint_buckets=kwargs.get("deltanet_hash_checkpoint", True))
+ 
+         assert self.sort_key in VALID_SORT_KEYS, f"bad sort_key {self.sort_key}"
+         assert self.direction in ("uni", "bi")
+@@ -236,6 +274,11 @@ class DeltaNetAttention(nn.Module):
+     def _scan(self, q, k, v, beta):
+         """q,k,v: [H, N, Dh]; beta: [H, N]. Pads to chunk_size, runs kernel."""
+         h, n, d = q.shape
++        if self.kernel == "hept" and self.hept_backend == "exact":
++            if n > self.exact_max_points:
++                raise ValueError(f"Exact Gaussian DeltaNet is quadratic: {n} points exceeds "
++                                 f"deltanet_hept_exact_max_points={self.exact_max_points}; use hash or rff for full events")
++            return kernel_delta_rule(q, k, v, beta)
+         pad = (-n) % self.chunk_size
+         if pad:
+             q = F.pad(q, (0, 0, 0, pad))
+@@ -261,8 +304,23 @@ class DeltaNetAttention(nn.Module):
+         k = rearrange(key, "n (h d) -> h n d", h=self.num_heads)
+         v = rearrange(value, "n (h d) -> h n d", h=self.num_heads)
+ 
+-        q = self._norm_qk(q)
+-        k = self._norm_qk(k)
++        if self.kernel == "hept":
++            rpe = kwargs.get("w_rpe")
++            if rpe is None:
++                raise ValueError("HEPT-kernel DeltaNet needs the backbone w_rpe module")
++            w = rearrange(rpe.weight, "(h d) (r k) -> h d r k", h=self.num_heads,
++                          d=self.dim_per_head, k=self.num_w_per_dist)
++            q, k = prep_qk(rearrange(q, "h n d -> n h d"), rearrange(k, "h n d -> n h d"),
++                            w, kwargs["coords"])
++            q, k = [rearrange(a, "n h d -> h n d") for a in (q,k)]
++            if self.hept_backend == "rff":
++                q, k = self.kernel_map(q), self.kernel_map(k)
++                # Existing delta kernels scale queries by D^-0.5. Cancel that
++                # only here so effective q.k approximates the HEPT kernel itself.
++                q = q * (self.kernel_features ** 0.5)
++        else:
++            q = self._norm_qk(q)
++            k = self._norm_qk(k)
+ 
+         if self.use_beta:
+             beta = self.b_proj(v).squeeze(-1).sigmoid()        # [H, N]
+@@ -275,6 +333,11 @@ class DeltaNetAttention(nn.Module):
+         coords = kwargs["coords"]
+         pt = kwargs.get("pt", None)
+         perm, inv_perm = compute_sort_perm(coords, pt, self.sort_key)
++        if self.kernel == "hept" and self.hept_backend == "hash":
++            # inv_perm gives each original point its causal rank. Query and key
++            # bucket permutations differ, so a positional triangle is invalid.
++            o = self.hash_delta(q, k, v, beta, coords, inv_perm, self.direction)
++            return self.out_linear(rearrange(o, "h n d -> n (h d)"))
+         qs, ks, vs, betas = q[:, perm], k[:, perm], v[:, perm], beta[:, perm]
+ 
+         o = self._scan(qs, ks, vs, betas)
+diff --git a/src/models/attention/hept.py b/src/models/attention/hept.py
+index 2cd4658..0082866 100644
+--- a/src/models/attention/hept.py
++++ b/src/models/attention/hept.py
+@@ -19,12 +19,30 @@ def unsort_from_buckets(s_x, perm_inverse):
+     return batched_index_select(b_x, perm_inverse)
+ 
+ 
+-def qkv_res(s_query, s_key, s_value):
++def qkv_res(s_query, s_key, s_value, key_mask=None, *, normalized=False):
++    """Gaussian block attention; optionally return log mass and normalized output.
++
++    The log-space form lets OR tables merge by their true kernel mass, even
++    when all unshifted Gaussian weights would underflow. Padding is excluded
++    from both the numerator and denominator.
++    """
++    if s_query.dtype in (torch.float16, torch.bfloat16):
++        s_query, s_key, s_value = s_query.float(), s_key.float(), s_value.float()
+     q_sq_05 = -0.5 * (s_query**2).sum(dim=-1, keepdim=True)
+     k_sq_05 = -0.5 * (s_key**2).sum(dim=-1, keepdim=True)
+ 
+     clustered_dists = torch.einsum("...id,...jd->...ij", s_query, s_key)
+-    clustered_dists = (clustered_dists + q_sq_05 + k_sq_05.transpose(-1, -2)).clamp(max=0.0).exp()
++    scores = (clustered_dists + q_sq_05 + k_sq_05.transpose(-1, -2)).clamp(max=0.0)
++    if key_mask is not None:
++        scores = scores.masked_fill(~key_mask.unsqueeze(-2), float("-inf"))
++    if normalized:
++        log_mass = torch.logsumexp(scores, dim=-1, keepdim=True)
++        # Also define fully masked blocks as zero, rather than NaN.
++        finite = torch.isfinite(log_mass)
++        safe_scores = torch.where(finite, scores, torch.zeros_like(scores))
++        weights = safe_scores.softmax(dim=-1) * finite.to(scores.dtype)
++        return log_mass, torch.einsum("...ij,...jd->...id", weights, s_value)
++    clustered_dists = scores.exp()
+ 
+     denom = clustered_dists.sum(dim=-1, keepdim=True) + (1e-20)
+     qk = clustered_dists
+@@ -66,10 +84,15 @@ class HEPTAttention(nn.Module):
+         self.block_size = kwargs["block_size"]
+         self.n_hashes = kwargs["n_hashes"]
+         self.num_w_per_dist = kwargs["num_w_per_dist"]
++        if min(self.block_size, self.n_hashes, self.num_w_per_dist, self.num_heads, self.dim_per_head) < 1:
++            raise ValueError("HEPT dimensions, block_size, n_hashes and num_w_per_dist must be positive")
+         self.e2lsh = E2LSH(n_hashes=self.n_hashes, n_heads=self.num_heads, dim=hash_dim)
+ 
+     def forward(self, query, key, value, **kwargs):
+-        # TODO: support batched inputs
++        # One event per forward; the backbone enforces batch_size=1.
++        raw_size = int(kwargs["raw_size"])
++        if not 0 < raw_size <= query.shape[0] or query.shape[0] % self.block_size:
++            raise ValueError("HEPT needs a nonempty event padded to block_size")
+         query = query.view(-1, self.num_heads, self.dim_per_head)
+         key = key.view(-1, self.num_heads, self.dim_per_head)
+         value = value.view(-1, self.num_heads, self.dim_per_head)
+@@ -86,11 +109,17 @@ class HEPTAttention(nn.Module):
+         q_hat = rearrange(q_hat, "n h d -> h n d")
+         k_hat = rearrange(k_hat, "n h d -> h n d")
+         value = rearrange(value, "n h d -> h n d")
+-        q_hat[:, kwargs["raw_size"] :] = 0.0
+-        k_hat[:, kwargs["raw_size"] :] = 0.0
+-        value[:, kwargs["raw_size"] :] = 0.0
+-
+-        q_hashed, k_hashed, hash_shift = lsh_mapping(self.e2lsh, q_hat, k_hat)
++        valid = torch.arange(query.shape[0], device=query.device) < raw_size
++        q_hat = q_hat.masked_fill(~valid[None, :, None], 0.0)
++        k_hat = k_hat.masked_fill(~valid[None, :, None], 0.0)
++        value = value.masked_fill(~valid[None, :, None], 0.0)
++
++        # Dummy points must not change the hash range used to separate regions.
++        q_hashed, k_hashed, hash_shift = lsh_mapping(self.e2lsh, q_hat[..., :raw_size, :], k_hat[..., :raw_size, :])
++        if raw_size < query.shape[0]:
++            pad = query.shape[0] - raw_size
++            q_hashed = torch.nn.functional.pad(q_hashed, (0, pad), value=float("inf"))
++            k_hashed = torch.nn.functional.pad(k_hashed, (0, pad), value=float("inf"))
+         hash_shift = rearrange(hash_shift, "c h d -> (c h) d")
+         q_hashed[..., kwargs["raw_size"] :] = float("inf")
+         k_hashed[..., kwargs["raw_size"] :] = float("inf")
+@@ -107,11 +136,14 @@ class HEPTAttention(nn.Module):
+         s_key = sort_to_buckets(k_hat, k_positions, self.block_size)
+         s_value = sort_to_buckets(value, k_positions, self.block_size)
+ 
+-        denom, so = qkv_res(s_query, s_key, s_value)
++        s_valid = rearrange(valid[k_positions], "c h (b s) -> c h b s", s=self.block_size)
++        log_mass, so = qkv_res(s_query, s_key, s_value, s_valid, normalized=True)
+ 
+         q_rev_positions = invert_permutation(q_positions)
+         o = unsort_from_buckets(so, q_rev_positions)
+-        logits = unsort_from_buckets(denom, q_rev_positions)
+-        out = o.sum(dim=0) / logits.sum(dim=0)
++        logits = unsort_from_buckets(log_mass, q_rev_positions)
++        # Sec. 4.2: sum numerators / sum denominators across OR tables.
++        # An unweighted average of the individual table outputs is incorrect.
++        out = (o * logits.softmax(dim=0)).sum(dim=0).to(query.dtype)
+         out = self.out_linear(rearrange(out, "h n d -> n (h d)"))
+         return out
+diff --git a/src/models/attention/hept_delta_hash.py b/src/models/attention/hept_delta_hash.py
+new file mode 100644
+index 0000000..0b9b223
+--- /dev/null
++++ b/src/models/attention/hept_delta_hash.py
+@@ -0,0 +1,126 @@
++"""HEPT hash-selected, exact Gaussian delta updates in independent buckets.
++
++Hash tables select query/key blocks as in HEPT. Each key block owns its own
++memory; residual writes are causal in the configured event order. Query reads
++use event ranks, never query/key positions in their different hash sorts.
++Tables are averaged; there is no attention normalization or Fourier map.
++"""
++import torch
++from torch import nn
++from torch.nn import functional as F
++from torch.utils.checkpoint import checkpoint
++from einops import rearrange
++
++from .hept import get_geo_shift, sort_to_buckets, unsort_from_buckets
++from .hept_delta_kernel import gaussian_kernel
++from ..model_utils.hash_utils import (
++    E2LSH, get_regions, invert_permutation, lsh_mapping, quantile_partition,
++)
++
++
++def bucket_kernel_delta_rule(query, key, value, beta, query_ranks,
++                             key_ranks, key_valid, direction="bi"):
++    """Exact per-bucket recurrence; keys must be sorted by increasing rank.
++
++    Inputs have arbitrary batch dimensions followed by [points, dim] (ranks,
++    validity and beta omit dim). Queries need not have the same order as keys.
++    Padding has zero beta and is excluded from reads in both directions.
++    """
++    kk = gaussian_kernel(key, key)
++    qk = gaussian_kernel(query, key)
++    beta = beta * key_valid.to(beta.dtype)
++    identity = torch.eye(key.shape[-2], device=key.device, dtype=key.dtype)
++
++    def writes(kernel, gates, values):
++        system = torch.tril(gates.unsqueeze(-1) * kernel, diagonal=-1) + identity
++        return torch.linalg.solve_triangular(system, gates.unsqueeze(-1) * values, upper=False)
++
++    forward_writes = writes(kk, beta, value)
++    forward_mask = (key_ranks.unsqueeze(-2) <= query_ranks.unsqueeze(-1)) & key_valid.unsqueeze(-2)
++    output = (qk * forward_mask.to(qk.dtype)) @ forward_writes
++    if direction == "bi":
++        reverse_writes = writes(kk.flip((-2, -1)), beta.flip(-1), value.flip(-2)).flip(-2)
++        reverse_mask = (key_ranks.unsqueeze(-2) >= query_ranks.unsqueeze(-1)) & key_valid.unsqueeze(-2)
++        output = output + (qk * reverse_mask.to(qk.dtype)) @ reverse_writes
++    elif direction != "uni":
++        raise ValueError("direction must be uni or bi")
++    return output
++
++
++class HashBucketGaussianDelta(nn.Module):
++    """Parallel local memories with O(R*H*N*B) kernel entries, not N squared.
++
++    Work groups bound temporary matrix allocations. Optional recomputation
++    avoids retaining each group's dense kernels for backward. Fixed hash
++    projections and coordinate-region parameters are stored in checkpoints.
++    """
++    def __init__(self, num_heads, input_dim, block_size=100, n_hashes=3,
++                 num_regions=15, chunk_buckets=64, checkpoint_buckets=True):
++        super().__init__()
++        for name, size in (("block_size", block_size), ("n_hashes", n_hashes),
++                           ("chunk_buckets", chunk_buckets), ("num_heads", num_heads)):
++            if not isinstance(size, int) or isinstance(size, bool) or size < 1:
++                raise ValueError(f"{name} must be a positive integer")
++        if num_regions < 1:
++            raise ValueError("num_regions must be positive")
++        self.block_size = block_size
++        self.n_hashes = n_hashes
++        self.chunk_buckets = chunk_buckets
++        self.checkpoint_buckets = checkpoint_buckets
++        self.e2lsh = E2LSH(n_hashes, num_heads, input_dim)
++        self.register_buffer("regions", get_regions(num_regions, n_hashes, num_heads))
++
++    @torch.no_grad()
++    def bucket_positions(self, query, key, coords, order_ranks):
++        """Return [tables, heads, padded_points] query/key permutations.
++
++        Membership follows HEPT's separate query/key hash sorts and geographic
++        shifts. Reordering keys *within* a block preserves that membership.
++        Quantiles and hash ranges see real points only.
++        """
++        n = query.shape[-2]
++        q_hash, k_hash, shift = lsh_mapping(self.e2lsh, query, key)
++        regions_h = rearrange(self.regions, "c a h -> a (c h)")
++        region_indices = [quantile_partition(coords[:, axis].argsort(stable=True), regions_h[axis, :, None])
++                          for axis in range(2)]
++        q_shift, k_shift = get_geo_shift(regions_h, rearrange(shift, "c h d -> (c h) d"),
++                                       region_indices, self.n_hashes)
++        pad = (-n) % self.block_size
++        q_positions = F.pad(q_hash + q_shift, (0, pad), value=float("inf")).argsort(dim=-1, stable=True)
++        k_positions = F.pad(k_hash + k_shift, (0, pad), value=float("inf")).argsort(dim=-1, stable=True)
++        ranks = F.pad(order_ranks, (0, pad), value=n)
++        keys = rearrange(k_positions, "c h (b s) -> c h b s", s=self.block_size)
++        local_order = ranks[keys].argsort(dim=-1, stable=True)
++        k_positions = rearrange(keys.gather(-1, local_order), "c h b s -> c h (b s)")
++        return q_positions, k_positions
++
++    def forward(self, query, key, value, beta, coords, order_ranks, direction="bi"):
++        n = query.shape[-2]
++        if n < 1:
++            raise ValueError("hash Gaussian DeltaNet needs a nonempty event")
++        q_positions, k_positions = self.bucket_positions(query, key, coords, order_ranks)
++        pad = (-n) % self.block_size
++        query, key, value = [F.pad(x, (0, 0, 0, pad)) for x in (query, key, value)]
++        beta = F.pad(beta, (0, pad))
++        ranks = F.pad(order_ranks, (0, pad), value=n)
++        s_query, s_key, s_value = [sort_to_buckets(x, positions, self.block_size)
++                                  for x, positions in ((query, q_positions), (key, k_positions), (value, k_positions))]
++        s_beta = sort_to_buckets(beta.unsqueeze(-1), k_positions, self.block_size).squeeze(-1)
++        q_ranks = rearrange(ranks[q_positions], "c h (b s) -> c h b s", s=self.block_size)
++        k_ranks = rearrange(ranks[k_positions], "c h (b s) -> c h b s", s=self.block_size)
++        valid = rearrange(k_positions < n, "c h (b s) -> c h b s", s=self.block_size)
++        table_outputs = []
++        for table in range(self.n_hashes):
++            groups = []
++            for start in range(0, s_query.shape[2], self.chunk_buckets):
++                sl = slice(start, start + self.chunk_buckets)
++                inputs = (s_query[table, :, sl], s_key[table, :, sl], s_value[table, :, sl],
++                          s_beta[table, :, sl], q_ranks[table, :, sl], k_ranks[table, :, sl], valid[table, :, sl])
++                if self.checkpoint_buckets and torch.is_grad_enabled() and any(x.requires_grad for x in inputs):
++                    group = checkpoint(bucket_kernel_delta_rule, *inputs, direction=direction, use_reentrant=False)
++                else:
++                    group = bucket_kernel_delta_rule(*inputs, direction=direction)
++                groups.append(group)
++            table_outputs.append(torch.cat(groups, dim=1))
++        output = unsort_from_buckets(torch.stack(table_outputs), invert_permutation(q_positions))
++        return output[..., :n, :].mean(dim=0)
+diff --git a/src/models/attention/hept_delta_kernel.py b/src/models/attention/hept_delta_kernel.py
+new file mode 100644
+index 0000000..d6348c3
+--- /dev/null
++++ b/src/models/attention/hept_delta_kernel.py
+@@ -0,0 +1,55 @@
++"""The HEPT Gaussian kernel inside DeltaNet's delta-rule update.
++
++The exact dual form is quadratic in event length. Paired random Fourier
++features provide a bounded, unit-norm finite feature map for a linear-size
++recurrent state. Neither path computes HEPT's normalized LSH attention.
++"""
++import math
++import torch
++from torch import nn
++
++
++def gaussian_kernel(query, key):
++    """exp(-||query-key||^2 / 2), with [heads, points, augmented_dim]."""
++    scores = query @ key.transpose(-1, -2)
++    scores = scores - query.square().sum(-1, keepdim=True) / 2
++    scores = scores - key.square().sum(-1).unsqueeze(-2) / 2
++    return scores.clamp(max=0).exp()
++
++
++def kernel_delta_rule(query, key, value, beta):
++    """Exact Gaussian RKHS delta rule (no query dimension scaling).
++
++    u_t = beta_t * (v_t - sum_{j<t} kernel(k_t,k_j) * u_j)
++    o_t = sum_{j<=t} kernel(q_t,k_j) * u_j
++
++    Solve the causal system for residual writes u in parallel. This is the
++    dual representation of the delta-rule state, not ordinary kernel attention.
++    """
++    kk = gaussian_kernel(key, key)
++    qk = gaussian_kernel(query, key)
++    system = torch.tril(beta.unsqueeze(-1) * kk, diagonal=-1)
++    system = system + torch.eye(key.shape[-2], device=key.device, dtype=key.dtype)
++    writes = torch.linalg.solve_triangular(system, beta.unsqueeze(-1) * value, upper=False)
++    return torch.tril(qk) @ writes
++
++
++class GaussianFourierFeatures(nn.Module):
++    """phi(x)=[cos(xW),sin(xW)]/sqrt(m), W columns iid N(0,I).
++
++    E[phi(x).phi(y)] = exp(-||x-y||^2/2). Every realized phi(x) has
++    norm one, preserving the stable unit-key delta update. Finite features
++    may yield negative off-diagonal approximations; that is documented.
++    """
++    def __init__(self, num_heads, input_dim, feature_dim=128, seed=0):
++        super().__init__()
++        if feature_dim < 2 or feature_dim % 2:
++            raise ValueError("deltanet_kernel_features must be an even integer >= 2")
++        self.feature_dim = feature_dim
++        generator = torch.Generator().manual_seed(seed)
++        self.register_buffer("frequencies", torch.randn(num_heads, input_dim, feature_dim // 2,
++                                                        generator=generator))
++
++    def forward(self, x):
++        angles = x @ self.frequencies
++        return torch.cat([angles.cos(), angles.sin()], dim=-1) / math.sqrt(self.feature_dim // 2)
+diff --git a/src/models/baselines/transformer.py b/src/models/baselines/transformer.py
+index 06871c3..cdaf2c3 100644
+--- a/src/models/baselines/transformer.py
++++ b/src/models/baselines/transformer.py
+@@ -30,7 +30,8 @@ def prepare_input(x, coords, edge_index, batch, attn_type, helper_funcs, pt=None
+         coords = to_dense_batch(coords, batch)[0]
+         key_padding_mask = FullMask(mask)
+     else:
+-        assert batch.max() == 0
++        if batch.numel() == 0 or batch.max().item() != 0:
++            raise ValueError(f"{attn_type} requires one nonempty event (batch_size=1)")
+         key_padding_mask = None
+         mask = None
+     kwargs["key_padding_mask"] = key_padding_mask
+@@ -50,12 +51,15 @@ def prepare_input(x, coords, edge_index, batch, attn_type, helper_funcs, pt=None
+             kwargs["raw_size"] = x.shape[0]
+             x = pad_to_multiple(x, block_size, dims=0)
+             kwargs["coords"] = pad_to_multiple(kwargs["coords"], block_size, dims=0, value=float("inf"))
+-            sorted_eta_idx = torch.argsort(kwargs["coords"][..., 0], dim=-1)
+-            sorted_phi_idx = torch.argsort(kwargs["coords"][..., 1], dim=-1)
++            sorted_eta_idx = torch.argsort(coords[..., 0], dim=-1)
++            sorted_phi_idx = torch.argsort(coords[..., 1], dim=-1)
+             regions = helper_funcs["regions"]
+             regions_h = rearrange(regions, "c a h -> a (c h)")
+             region_indices_eta = quantile_partition(sorted_eta_idx, regions_h[0][:, None])
+             region_indices_phi = quantile_partition(sorted_phi_idx, regions_h[1][:, None])
++            # Quantiles use real points only; append dummy region codes afterward.
++            region_indices_eta = pad_to_multiple(region_indices_eta, block_size, dims=-1)
++            region_indices_phi = pad_to_multiple(region_indices_phi, block_size, dims=-1)
+             kwargs["region_indices"] = [region_indices_eta, region_indices_phi]
+             kwargs["regions_h"] = regions_h
+             kwargs["coords"][kwargs["raw_size"] :] = 0.0
+@@ -121,8 +125,10 @@ class Transformer(nn.Module):
+ 
+     def forward(self, data):
+         pt = None
++        use_ckpt = self.use_ckpt
+         if isinstance(data, dict):
+-            x, edge_index, coords, batch, self.use_ckpt = data["x"], data["edge_index"], data["coords"], data["batch"], False
++            x, edge_index, coords, batch = data["x"], data["edge_index"], data["coords"], data["batch"]
++            use_ckpt = False
+             pt = data.get("pt", None)
+         else:
+             x, edge_index, coords, batch = data.x, data.edge_index, data.coords, data.batch
+@@ -133,6 +139,8 @@ class Transformer(nn.Module):
+             pids_emb = self.pids_enc(x[..., -1].long())
+             x = torch.cat((x[..., :-1], pids_emb), dim=-1)
+ 
++        if self.attn_type == "hept":
++            self.helper_funcs["regions"] = self.regions
+         x, mask, kwargs = prepare_input(x, coords, edge_index, batch, self.attn_type, self.helper_funcs, pt=pt)
+ 
+         encoded_x = self.feat_encoder(x)
+@@ -142,8 +150,8 @@ class Transformer(nn.Module):
+                 encoded_x, all_shift_x = self.attns[i](encoded_x, kwargs)
+                 all_encoded_x = all_encoded_x + all_shift_x
+             else:
+-                if self.use_ckpt:
+-                    encoded_x = checkpoint(self.attns[i], encoded_x, kwargs)
++                if use_ckpt:
++                    encoded_x = checkpoint(self.attns[i], encoded_x, kwargs, use_reentrant=False)
+                 else:
+                     encoded_x = self.attns[i](encoded_x, kwargs)
+                 all_encoded_x.append(encoded_x)
+@@ -180,9 +188,9 @@ class Attn(nn.Module):
+             # +2 for data.pos
+             self.attn = HEPTAttention(self.dim_per_head + coords_dim, **kwargs)
+         elif attn_type == "deltanet":
+-            # DeltaNet token-mixer: same q/k/v projections as the other mixers,
+-            # consumes coords only to order the points (no pairwise RPE).
+-            self.attn = DeltaNetAttention(**kwargs)
++            # Standard DeltaNet uses coords for ordering; the Gaussian-kernel
++            # variant also uses them in its learned kernel augmentation.
++            self.attn = DeltaNetAttention(coords_dim=coords_dim, **kwargs)
+         elif attn_type == "performer":
+             self.attn = PerformerAttention(coords_dim=coords_dim, **kwargs)
+         elif attn_type == "reformer":
+@@ -214,9 +222,15 @@ class Attn(nn.Module):
+ 
+         # DeltaNet has no pairwise relative-position encoding; skip the RPE
+         # weights so param/FLOP counts are honest for the comparison.
+-        if attn_type == "deltanet":
++        if attn_type == "deltanet" and kwargs.get("deltanet_kernel", "standard") == "standard":
+             self.w_rpe = None
+             self.pe_func = None
++        elif attn_type == "deltanet":
++            # Kernelized DeltaNet uses the same learned positive coordinate
++            # weights as HEPT, inside the Gaussian feature map / exact kernel.
++            self.w_rpe = nn.Linear(kwargs.get("num_w_per_dist",10) * (coords_dim - 1),
++                                   self.num_heads * self.dim_per_head)
++            self.pe_func = None
+         else:
+             # eta/phi from data.pos use the same weights as they are used to calc dR
+             self.w_rpe = nn.Linear(kwargs["num_w_per_dist"] * (coords_dim - 1), self.num_heads * self.dim_per_head)
+diff --git a/src/run.py b/src/run.py
+index cbfc5c6..14c7c5c 100644
+--- a/src/run.py
++++ b/src/run.py
+@@ -170,6 +170,8 @@ def run_one_epoch(task, model, optimizer, criterion, loader, phase, epoch, devic
+ # Driver
+ # ===========================================================================
+ def build(config):
++    if config["model_name"] in ("trans_hept", "trans_deltanet") and config["batch_size"] != 1:
++        raise ValueError("HEPT and DeltaNet currently require batch_size=1 (one event per forward)")
+     device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
+     torch.set_num_threads(config.get("num_threads", 4))
+     set_seed(config["seed"])
+@@ -188,8 +190,15 @@ def build(config):
+             s = idx_split[k]
+             idx_split[k] = s[: max_events] if not torch.is_tensor(s) else s[: max_events]
+ 
+-    loaders = get_data_loader(dataset, idx_split, batch_size=config["batch_size"])
+-    model = get_model(config["model_name"], config["model_kwargs"], dataset).to(device)
++    if any(len(idx_split[k]) == 0 for k in ("train", "valid", "test")):
++        raise ValueError("Dataset must have nonempty train, valid and test splits")
++    loaders = get_data_loader(dataset, idx_split, batch_size=config["batch_size"],
++                              num_workers=config.get("num_workers", 0))
++    # Legacy dataset constructors may seed preprocessing globally (Pileup=42).
++    # Restore the requested model/loader seed after loading stored data.
++    set_seed(config["seed"])
++    model = get_model(config["model_name"], config["model_kwargs"], dataset,
++                      count_flops=config.get("count_flops", False)).to(device)
+     criterion = get_loss(config["loss_name"], config["loss_kwargs"])
+     return device, task, dataset, loaders, model, criterion
+ 
+@@ -244,7 +253,7 @@ def train(config, logger: RunLogger):
+ 
+ def test(config, ckpt_path, logger: RunLogger):
+     device, task, dataset, loaders, model, criterion = build(config)
+-    state = torch.load(ckpt_path, map_location=device)
++    state = torch.load(ckpt_path, map_location=device, weights_only=True)
+     model.load_state_dict(state, strict=True)
+     logger.info(f"loaded checkpoint {ckpt_path}")
+     metrics = tracking_metrics_dict() if task == "tracking" else pileup_metrics_dict()
+@@ -260,6 +269,8 @@ def main():
+     ap.add_argument("--config", required=True, type=str)
+     ap.add_argument("--mode", choices=["train", "test"], default="train")
+     ap.add_argument("--ckpt", type=str, default=None, help="checkpoint for --mode test")
++    ap.add_argument("--kernel", choices=["hept", "deltanet", "deltanet-hept"],
++                    help="select the token mixer while keeping the configured backbone and task")
+     ap.add_argument("--note", type=str, default=None, help="override config note")
+     ap.add_argument("--override", "-o", action="append", default=[],
+                     help="dotted-key override, e.g. -o model_kwargs.deltanet_sort_key=phi "
+@@ -267,10 +278,27 @@ def main():
+     args = ap.parse_args()
+ 
+     config = yaml.safe_load(Path(args.config).read_text())
++    if args.kernel:
++        config["model_name"] = "trans_" + ("deltanet" if args.kernel == "deltanet-hept" else args.kernel)
++        if args.kernel in ("deltanet", "deltanet-hept"):
++            config["model_kwargs"]["deltanet_kernel"] = "hept" if args.kernel == "deltanet-hept" else "standard"
++        if args.kernel == "deltanet-hept":
++            config["model_kwargs"].update(deltanet_impl="torch", deltanet_qk_activation="identity", deltanet_qk_norm="none")
++            for key,value in dict(deltanet_hept_backend="rff", deltanet_kernel_features=128, num_w_per_dist=10,
++                                  block_size=100, n_hashes=3,
++                                  num_regions=15 if config["dataset_name"] == "tracking-6k" else (150 if "tracking" in config["dataset_name"] else 140)).items():
++                config["model_kwargs"].setdefault(key,value)
++        if args.kernel == "hept":
++            defaults = dict(block_size=100, n_hashes=3, num_regions=15 if config["dataset_name"] == "tracking-6k" else (150 if "tracking" in config["dataset_name"] else 140),
++                            pe_type="none", num_w_per_dist=10)
++            for key, value in defaults.items():
++                config["model_kwargs"].setdefault(key, value)
+     if args.note:
+         config["note"] = args.note
+     for ov in args.override:
+         key, _, val = ov.partition("=")
++        if "=" not in ov or not key or any(not p for p in key.split(".")):
++            ap.error(f"invalid override {ov!r}; expected dotted.key=value")
+         parsed = yaml.safe_load(val)
+         node = config
+         parts = key.split(".")
+@@ -278,6 +306,8 @@ def main():
+             node = node.setdefault(p, {})
+         node[parts[-1]] = parsed
+ 
++    if args.mode == "test" and not args.ckpt:
++        ap.error("--mode test requires --ckpt")
+     log_root = REPO_ROOT / "logs"
+     log_dir = make_log_dir(log_root, config["model_name"], config["dataset_name"],
+                            config.get("note", "run"), config["seed"])
+diff --git a/src/utils/get_data.py b/src/utils/get_data.py
+index 4afa485..21f587b 100644
+--- a/src/utils/get_data.py
++++ b/src/utils/get_data.py
+@@ -2,21 +2,24 @@ from torch_geometric.loader import DataLoader
+ from datasets import Tracking, TrackingTransform, Pileup, PileupTransform, ShardedPointDataset
+ 
+ 
+-def get_data_loader(dataset, idx_split, batch_size):
++def get_data_loader(dataset, idx_split, batch_size, num_workers=0):
+     train_loader = DataLoader(
+         dataset[idx_split["train"]],
+         batch_size=batch_size,
+         shuffle=True,
++        num_workers=num_workers,
+     )
+     valid_loader = DataLoader(
+         dataset[idx_split["valid"]],
+         batch_size=batch_size,
+         shuffle=False,
++        num_workers=num_workers,
+     )
+     test_loader = DataLoader(
+         dataset[idx_split["test"]],
+         batch_size=batch_size,
+         shuffle=False,
++        num_workers=num_workers,
+     )
+     return {"train": train_loader, "valid": valid_loader, "test": test_loader}
+ 
+diff --git a/src/utils/get_model.py b/src/utils/get_model.py
+index cc0e2b9..7f05e65 100644
+--- a/src/utils/get_model.py
++++ b/src/utils/get_model.py
+@@ -3,7 +3,7 @@ from models.baselines import Transformer, GNNStack
+ from fvcore.nn import FlopCountAnalysis, flop_count_table
+ 
+ 
+-def get_model(model_name, model_kwargs, dataset, test_N=10000, test_k=100):
++def get_model(model_name, model_kwargs, dataset, test_N=10000, test_k=100, count_flops=False):
+     model_type = model_name.split("_")[0]
+     if model_type == "trans":
+         model = Transformer(
+@@ -27,10 +27,17 @@ def get_model(model_name, model_kwargs, dataset, test_N=10000, test_k=100):
+     model.model_name = model_name
+     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+     print(f"Number of parameters: {num_params}")
+-    try:
+-        count_flops_and_params(model, dataset, test_N, test_k)
+-    except Exception as e:  # fvcore can choke on data-dependent control flow (e.g. sort/loops)
+-        print(f"[get_model] FLOP counting skipped: {type(e).__name__}: {e}")
++    if count_flops:
++        # Profiling should not change initialization, dropout state or RNG state.
++        was_training = model.training
++        try:
++            model.eval()
++            with torch.random.fork_rng(devices=[]):
++                count_flops_and_params(model, dataset, test_N, test_k)
++        except Exception as e:
++            print(f"[get_model] FLOP counting skipped: {type(e).__name__}: {e}")
++        finally:
++            model.train(was_training)
+     return model
+ 
+ 
+diff --git a/src/utils/losses.py b/src/utils/losses.py
+index 553f129..442349d 100644
+--- a/src/utils/losses.py
++++ b/src/utils/losses.py
+@@ -9,6 +9,8 @@ class InfoNCELoss(nn.Module):
+     def __init__(self, tau, dist_metric):
+         super().__init__()
+         self.tau = tau
++        if tau <= 0:
++            raise ValueError("InfoNCE tau must be positive")
+         self.dist_metric = dist_metric
+ 
+     def forward(self, x, point_pairs, cluster_ids, recons, pts, **kwargs):
+@@ -17,6 +19,8 @@ class InfoNCELoss(nn.Module):
+         extra_pos_pair_mask = pair_filter(cluster_ids, point_pairs, recons, pts, pt_thres=0.9)
+         all_pos_pair_mask = all_pos_pair_mask & extra_pos_pair_mask
+         all_neg_pair_mask = ~all_pos_pair_mask
++        if not all_pos_pair_mask.any():
++            raise ValueError("InfoNCE event has no positive pairs after the reconstructable/pt>0.9 filter")
+ 
+         if self.dist_metric == "cosine":
+             similarity = F.cosine_similarity(x[point_pairs[0]], x[point_pairs[1]], dim=-1)
+@@ -47,7 +51,7 @@ class InfoNCELoss(nn.Module):
+ 
+         numerator = pos_exp_sim
+         group_indices = all_pairs[0][all_neg_pair_mask]
+-        denominator = deterministic_scatter(neg_exp_sim, group_indices, reduce="sum").clamp(min=0)
++        denominator = deterministic_scatter(neg_exp_sim, group_indices, reduce="sum", dim_size=x.size(0)).clamp(min=0)
+ 
+         denominator = denominator[all_pairs[0][all_pos_pair_mask]]
+         loss_per_pos_pair = -torch.log(numerator / (numerator + denominator))
+@@ -63,7 +67,7 @@ class InfoNCELoss(nn.Module):
+         return loss_per_pos_pair
+ 
+ 
+-def deterministic_scatter(src, index, reduce):
++def deterministic_scatter(src, index, reduce, dim_size=None):
+     sorted_arg = torch.argsort(index)
+     sorted_index = index[sorted_arg]
+     sorted_src = src[sorted_arg]
+@@ -71,6 +75,10 @@ def deterministic_scatter(src, index, reduce):
+     indptr = torch.zeros(len(unique_groups) + 1, device=src.device)
+     indptr[1:] = torch.cumsum(counts, dim=0)
+     output = segment_csr(sorted_src, indptr.long(), reduce=reduce)
++    if dim_size is not None:
++        # segment_csr returns compact groups; point IDs may contain gaps.
++        dense = src.new_zeros(dim_size)
++        return dense.index_copy(0, unique_groups, output)
+     return output
+ 
+ 
+diff --git a/src/utils/metrics.py b/src/utils/metrics.py
+index 128f031..020e925 100644
+--- a/src/utils/metrics.py
++++ b/src/utils/metrics.py
+@@ -2,7 +2,6 @@ import torch
+ import torch.nn.functional as F
+ import numpy as np
+ from numba import jit
+-from torch_scatter import scatter_mean
+ 
+ 
+ def pair_filter(cluster_ids, point_pairs, recons, pts, pt_thres):
+@@ -21,13 +20,18 @@ def point_filter(cluster_ids, recons, pts, pt_thres):
+ 
+ 
+ @torch.no_grad()
+-def acc_and_pr_at_k(embeddings, cluster_ids, mask, dist_metric, K=19, batch_size=None):
++def acc_and_pr_at_k(embeddings, cluster_ids, mask, dist_metric, K=19, batch_size=1024):
+     cluster_ids = cluster_ids.cpu().numpy()
+     mask = mask.cpu().numpy()
+ 
+     num_points = embeddings.shape[0]
+     if batch_size is None:
+-        batch_size = num_points
++        batch_size = 1024
++    if batch_size < 1:
++        raise ValueError("Metric batch_size must be positive")
++    K = min(K, num_points - 1)
++    if K < 1 or not mask.any():
++        raise ValueError("Tracking metric needs eligible points and at least two hits")
+ 
+     unique_clusters, counts = np.unique(cluster_ids, return_counts=True)
+     cluster_sizes = dict(zip(unique_clusters.tolist(), counts.tolist()))
+@@ -40,6 +44,8 @@ def acc_and_pr_at_k(embeddings, cluster_ids, mask, dist_metric, K=19, batch_size
+         batch_mask = mask[start_index:end_index]
+         batch_embeddings = embeddings[start_index:end_index][batch_mask]
+         batch_cluster_ids = cluster_ids[start_index:end_index][batch_mask]
++        if not batch_mask.any():
++            continue
+ 
+         if "l2" in dist_metric:
+             dist_mat_batch = torch.cdist(batch_embeddings, embeddings, p=2.0)
+@@ -51,7 +57,10 @@ def acc_and_pr_at_k(embeddings, cluster_ids, mask, dist_metric, K=19, batch_size
+         # Each point should have (cluster_size - 1) true neighbors
+         k_list = np.array([cluster_sizes[each_cluster_id] - 1 for each_cluster_id in batch_cluster_ids])
+         assert max(k_list) <= K, f"K is too small, max k is {max(k_list)}"
+-        indices = dist_mat_batch.topk(K + 1, dim=1, largest=False, sorted=True)[1].cpu().numpy()
++        # Exclude self explicitly: tied embeddings need not rank self first.
++        self_indices = torch.as_tensor(np.flatnonzero(batch_mask) + start_index, device=embeddings.device)
++        dist_mat_batch[torch.arange(len(self_indices), device=embeddings.device), self_indices] = float("inf")
++        indices = dist_mat_batch.topk(K, dim=1, largest=False, sorted=True)[1].cpu().numpy()
+ 
+         acc, prec, recall, filtered_cluster_ids = calc_scores(K, k_list, indices, cluster_ids, batch_cluster_ids)
+ 
+@@ -73,7 +82,7 @@ def calc_scores(K, k_list, indices, cluster_ids, batch_cluster_ids):
+             continue
+ 
+         # slice the k nearest neighbors
+-        neighbors = indices[i, 1 : K + 1]
++        neighbors = indices[i, :K]
+ 
+         # Retrieve the labels of the k nearest neighbors
+         neighbor_labels = cluster_ids[neighbors]
+diff --git a/src/utils/run_logger.py b/src/utils/run_logger.py
+index f090a5f..969e447 100644
+--- a/src/utils/run_logger.py
++++ b/src/utils/run_logger.py
+@@ -64,6 +64,6 @@ class RunLogger:
+ 
+ 
+ def make_log_dir(root: Path, model_name: str, dataset_name: str, note: str, seed: int) -> Path:
+-    stamp = datetime.now().strftime("%m_%d-%H_%M_%S")
++    stamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S_%f")
+     name = f"{stamp}_{model_name}_{dataset_name}_{seed}_{note}"
+     return Path(root) / name
+diff --git a/src/utils/utils.py b/src/utils/utils.py
+index 2f0f5d8..9726231 100644
+--- a/src/utils/utils.py
++++ b/src/utils/utils.py
+@@ -43,7 +43,7 @@ def get_loss(loss_name, loss_kwargs):
+     elif loss_name == "crossentropy":
+         return torch.nn.BCELoss()
+     elif loss_name == "focal":
+-        return FocalLoss()
++        return FocalLoss(**loss_kwargs)
+     else:
+         raise NotImplementedError
+ 
+diff --git a/tests/test_hept_correctness.py b/tests/test_hept_correctness.py
+new file mode 100644
+index 0000000..ca79256
+--- /dev/null
++++ b/tests/test_hept_correctness.py
+@@ -0,0 +1,105 @@
++"""Check Gaussian math and the LSH approximation against independent dense math."""
++import sys
++from pathlib import Path
++
++import pytest
++import torch
++from einops import rearrange
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from models.attention.hept import HEPTAttention, prep_qk, get_geo_shift, qkv_res
++from models.baselines.transformer import Transformer, prepare_input
++from models.model_utils.hash_utils import get_regions, lsh_mapping
++
++
++def setup_inputs(n=11, block=4, hashes=3, dtype=torch.float64):
++    torch.manual_seed(10)
++    heads, dim, cd = 2, 3, 3
++    options = dict(h_dim=dim, num_heads=heads, block_size=block, n_hashes=hashes, num_w_per_dist=2)
++    layer = HEPTAttention(dim + cd, **options).to(dtype=dtype)
++    rpe = torch.nn.Linear(4, heads * dim).to(dtype=dtype)
++    coords = torch.randn(n, cd, dtype=dtype)
++    regions = get_regions(4, hashes, heads).to(dtype=dtype)
++    x, _, helper = prepare_input(torch.randn(n, heads * dim, dtype=dtype), coords, None,
++                                  torch.zeros(n, dtype=torch.long), "hept",
++                                  dict(block_size=block, regions=regions))
++    q, k, v = [torch.randn_like(x).requires_grad_() for _ in range(3)]
++    helper["w_rpe"] = rpe
++    return layer, q, k, v, helper
++
++
++def dense_reference(layer, q, k, v, helper, sparse):
++    n = helper["raw_size"]
++    w = rearrange(helper["w_rpe"].weight, "(h d) (r k) -> h d r k", h=layer.num_heads,
++                  d=layer.dim_per_head, k=layer.num_w_per_dist)
++    qa, ka = prep_qk(q.reshape(-1, layer.num_heads, layer.dim_per_head),
++                     k.reshape(-1, layer.num_heads, layer.dim_per_head), w, helper["coords"])
++    qa, ka = [rearrange(a[:n], "n h d -> h n d") for a in (qa, ka)]
++    values = rearrange(v[:n], "n (h d) -> h n d", h=layer.num_heads)
++    counts = q.new_zeros(layer.num_heads, n, n)
++    if sparse:
++        with torch.no_grad():
++            qhash, khash, shift = lsh_mapping(layer.e2lsh, qa, ka)
++            qs, ks = get_geo_shift(helper["regions_h"], rearrange(shift, "c h d -> (c h) d"),
++                                   [a[..., :n] for a in helper["region_indices"]], layer.n_hashes)
++            qp, kp = (qhash + qs).argsort(-1), (khash + ks).argsort(-1)
++            for t in range(layer.n_hashes):
++                for h in range(layer.num_heads):
++                    for start in range(0, n, layer.block_size):
++                        rows = qp[t, h, start:start+layer.block_size]
++                        cols = kp[t, h, start:start+layer.block_size]
++                        counts[h, rows[:, None], cols[None, :]] += 1
++    else:
++        counts.fill_(1)
++    # Independent direct squared differences, rather than norm + matmul identity.
++    scores = -0.5 * (qa[:, :, None] - ka[:, None, :]).square().sum(-1) + counts.log()
++    out = scores.softmax(-1) @ values
++    return layer.out_linear(rearrange(out, "h n d -> n (h d)"))
++
++
++@pytest.mark.parametrize("n,block,hashes", [(5,16,1),(7,16,3),(11,4,3),(1,4,2),(12,4,2)])
++def test_dense_and_sparse_reference(n, block, hashes):
++    layer, q, k, v, helper = setup_inputs(n, block, hashes)
++    actual = layer(q, k, v, **helper)[:n]
++    expected = dense_reference(layer, q, k, v, helper, sparse=n > block)
++    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-9)
++    params = (q, k, v, helper["w_rpe"].weight)
++    actual_grads = torch.autograd.grad(actual.square().sum(), params, retain_graph=True)
++    expected_grads = torch.autograd.grad(expected.square().sum(), params)
++    for a, b in zip(actual_grads, expected_grads):
++        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-8)
++
++
++def test_padding_does_not_dilute_values():
++    a, q, k, v, helper = setup_inputs(n=5, block=16)
++    v = torch.ones_like(v)
++    expected = a.out_linear(torch.ones(5, a.num_heads * a.dim_per_head, dtype=q.dtype))
++    torch.testing.assert_close(a(q,k,v,**helper)[:5], expected)
++
++
++def test_underflow_and_empty_blocks():
++    q = torch.tensor([[[100.0, 0.0]]], requires_grad=True)
++    k = torch.tensor([[[0.0, 0.0], [0.0, 1.0]]], requires_grad=True)
++    v = torch.tensor([[[2.0], [4.0]]], requires_grad=True)
++    mass, out = qkv_res(q,k,v,normalized=True)
++    torch.testing.assert_close(out, torch.tensor([[[2.7550814]]]))
++    assert torch.isfinite(mass).all()
++    out.sum().backward()
++    assert all(torch.isfinite(a.grad).all() for a in (q,k,v))
++    mass, out = qkv_res(q,k,v,torch.zeros(1,2,dtype=torch.bool),normalized=True)
++    assert torch.isneginf(mass).all() and (out == 0).all()
++
++
++def test_backbone_checkpoint_and_forward_do_not_change_setting():
++    options = dict(num_heads=2,h_dim=8,n_layers=2,block_size=4,n_hashes=2,num_regions=4,
++                   pe_type="none",num_w_per_dist=2,use_ckpt=True)
++    model = Transformer("hept",5,3,"tracking",**options)
++    data = dict(x=torch.randn(7,5),coords=torch.randn(7,3),edge_index=None,batch=torch.zeros(7,dtype=torch.long))
++    model(data)
++    assert model.use_ckpt
++    from torch_geometric.data import Data
++    model(Data(x=data["x"], coords=data["coords"], edge_index=torch.empty(2,0,dtype=torch.long),
++               batch=data["batch"])).square().mean().backward()
++    assert torch.isfinite(model.feat_encoder[0].weight.grad).all()
++    with pytest.raises(ValueError, match="batch_size=1"):
++        model(dict(data,batch=torch.tensor([0,0,0,1,1,1,1])))
+diff --git a/tests/test_hept_delta_hash.py b/tests/test_hept_delta_hash.py
+new file mode 100644
+index 0000000..ce1303d
+--- /dev/null
++++ b/tests/test_hept_delta_hash.py
+@@ -0,0 +1,163 @@
++"""Independent recurrence and integration checks for hash-local DeltaNet."""
++import sys
++from pathlib import Path
++
++import pytest
++import torch
++from einops import rearrange
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from models.attention.deltanet import DeltaNetAttention
++from models.attention.hept_delta_hash import HashBucketGaussianDelta, bucket_kernel_delta_rule
++from models.attention.hept import get_geo_shift
++from models.model_utils.hash_utils import lsh_mapping, quantile_partition
++
++
++def sequential_bucket(q, k, v, beta, qr, kr, valid, direction):
++    """Explicit residual writes and rank-based reads, with direct distances."""
++    kk = torch.exp(-0.5 * (k.unsqueeze(-2) - k.unsqueeze(-3)).square().sum(-1))
++    qk = torch.exp(-0.5 * (q.unsqueeze(-2) - k.unsqueeze(-3)).square().sum(-1))
++    output = torch.zeros(*q.shape[:-1], v.shape[-1], dtype=q.dtype, device=q.device)
++    for reverse in ([False, True] if direction == "bi" else [False]):
++        indices = list(range(k.shape[-2]))
++        if reverse:
++            indices.reverse()
++        writes = []
++        for t in indices:
++            prediction = torch.zeros_like(v[..., t, :])
++            for j, u in writes:
++                prediction = prediction + kk[..., t, j, None] * u
++            u = (beta[..., t] * valid[..., t])[..., None] * (v[..., t, :] - prediction)
++            writes.append((t, u))
++            mask = (qr >= kr[..., t, None]) if not reverse else (qr <= kr[..., t, None])
++            mask = mask & valid[..., t, None]
++            output = output + (qk[..., :, t] * mask)[..., None] * u.unsqueeze(-2)
++    return output
++
++
++@pytest.mark.parametrize("direction", ["uni", "bi"])
++def test_bucket_recurrence_and_gradients_with_separate_query_order(direction):
++    torch.manual_seed(17)
++    q = torch.randn(2, 3, 5, 4, dtype=torch.float64, requires_grad=True)
++    k = torch.randn(2, 3, 6, 4, dtype=torch.float64, requires_grad=True)
++    v = torch.randn(2, 3, 6, 2, dtype=torch.float64, requires_grad=True)
++    beta = torch.rand(2, 3, 6, dtype=torch.float64, requires_grad=True)
++    qr = torch.tensor([7, 1, 5, 0, 3]).expand(2, 3, -1)
++    kr = torch.tensor([0, 2, 4, 6, 7, 9]).expand(2, 3, -1)
++    valid = torch.tensor([True, True, True, True, True, False]).expand(2, 3, -1)
++    actual = bucket_kernel_delta_rule(q, k, v, beta, qr, kr, valid, direction)
++    expected = sequential_bucket(q, k, v, beta, qr, kr, valid, direction)
++    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-11)
++    for a, b in zip(torch.autograd.grad(actual.square().sum(), (q, k, v, beta), retain_graph=True),
++                    torch.autograd.grad(expected.square().sum(), (q, k, v, beta))):
++        torch.testing.assert_close(a, b, atol=1e-11, rtol=1e-10)
++    # Dummy writes cannot affect outputs even if their values are enormous.
++    changed = v.detach().clone(); changed[..., -1, :] = 1e12
++    torch.testing.assert_close(bucket_kernel_delta_rule(q, k, changed, beta, qr, kr, valid, direction), actual)
++
++
++@pytest.mark.parametrize("direction", ["uni", "bi"])
++def test_one_bucket_matches_full_exact_layer_with_padding(direction):
++    torch.manual_seed(3)
++    opts = dict(h_dim=4, num_heads=2, coords_dim=3, deltanet_kernel="hept",
++                deltanet_impl="torch", deltanet_qk_activation="identity", deltanet_qk_norm="none",
++                deltanet_sort_key="eta", deltanet_direction=direction, num_w_per_dist=2,
++                block_size=12, n_hashes=3, num_regions=3)
++    full = DeltaNetAttention(deltanet_hept_backend="exact", **opts).double()
++    local = DeltaNetAttention(deltanet_hept_backend="hash", **opts).double()
++    local.load_state_dict(full.state_dict(), strict=False)
++    q, k, v = [torch.randn(9, 8, dtype=torch.float64, requires_grad=True) * 0.2 for _ in range(3)]
++    coords = torch.randn(9, 3, dtype=torch.float64, requires_grad=True) * 0.1
++    rpe = torch.nn.Linear(4, 8).double()
++    a = full(q, k, v, coords=coords, w_rpe=rpe)
++    b = local(q, k, v, coords=coords, w_rpe=rpe)
++    torch.testing.assert_close(a, b, atol=1e-12, rtol=1e-10)
++    inputs = (q, k, v, coords, rpe.weight)
++    for ga, gb in zip(torch.autograd.grad(a.square().sum(), inputs, retain_graph=True),
++                      torch.autograd.grad(b.square().sum(), inputs)):
++        torch.testing.assert_close(ga, gb, atol=1e-11, rtol=1e-9)
++
++
++def test_hash_membership_matches_hept_and_multibucket_output_reference():
++    torch.manual_seed(13)
++    model = HashBucketGaussianDelta(2, 5, block_size=4, n_hashes=3, num_regions=4,
++                                   chunk_buckets=1, checkpoint_buckets=False).double()
++    n = 11
++    q, k = [torch.randn(2, n, 5, dtype=torch.float64) * 0.3 for _ in range(2)]
++    v = torch.randn(2, n, 3, dtype=torch.float64)
++    beta = torch.rand(2, n, dtype=torch.float64)
++    coords = torch.randn(n, 3, dtype=torch.float64)
++    ranks = coords[:, 0].argsort().argsort()
++    qp, kp = model.bucket_positions(q, k, coords, ranks)
++    # Independently reconstruct HEPT selection before the local key reorder.
++    qh, kh, shift = lsh_mapping(model.e2lsh, q, k)
++    rh = rearrange(model.regions, "c a h -> a (c h)")
++    regions = [quantile_partition(coords[:, a].argsort(), rh[a, :, None]) for a in range(2)]
++    qs, ks = get_geo_shift(rh, rearrange(shift, "c h d -> (c h) d"), regions, 3)
++    expected_qp, expected_kp = [torch.nn.functional.pad(x, (0, 1), value=float("inf")).argsort(stable=True)
++                               for x in (qh + qs, kh + ks)]
++    assert torch.equal(qp, expected_qp)
++    assert torch.equal(kp.reshape(3, 2, 3, 4).sort(-1).values,
++                       expected_kp.reshape(3, 2, 3, 4).sort(-1).values)
++    for direction in ("uni", "bi"):
++        expected = torch.zeros(2, n, 3, dtype=q.dtype)
++        for table in range(3):
++            for head in range(2):
++                for bucket in range(3):
++                    qi = qp[table, head, bucket*4:(bucket+1)*4]
++                    ki = kp[table, head, bucket*4:(bucket+1)*4]
++                    qi, ki = qi[qi < n], ki[ki < n]
++                    if qi.numel() == 0:
++                        continue
++                    out = sequential_bucket(q[head, qi], k[head, ki], v[head, ki], beta[head, ki],
++                                            ranks[qi], ranks[ki], torch.ones_like(ki, dtype=torch.bool), direction)
++                    expected[head, qi] += out / 3
++        torch.testing.assert_close(model(q, k, v, beta, coords, ranks, direction), expected,
++                                   atol=1e-12, rtol=1e-10)
++    # Replicating a table must not multiply the output magnitude.
++    with torch.no_grad():
++        model.e2lsh.alpha.copy_(model.e2lsh.alpha[..., :1].expand_as(model.e2lsh.alpha))
++        model.regions.copy_(model.regions[:1].expand_as(model.regions))
++    a = model(q, k, v, beta, coords, ranks)
++    single = HashBucketGaussianDelta(2, 5, 4, 1, 4, checkpoint_buckets=False).double()
++    with torch.no_grad():
++        single.e2lsh.alpha.copy_(model.e2lsh.alpha[..., :1])
++        single.regions.copy_(model.regions[:1])
++    torch.testing.assert_close(a, single(q, k, v, beta, coords, ranks))
++
++
++def test_work_groups_checkpoint_gradients_and_config_validation():
++    torch.manual_seed(12)
++    a = HashBucketGaussianDelta(2, 4, 4, 2, 3, chunk_buckets=1, checkpoint_buckets=True).double()
++    b = HashBucketGaussianDelta(2, 4, 4, 2, 3, chunk_buckets=64, checkpoint_buckets=False).double()
++    b.load_state_dict(a.state_dict())
++    q, k, v = [torch.randn(2, 13, 4, dtype=torch.float64, requires_grad=True) for _ in range(3)]
++    beta = torch.rand(2, 13, dtype=torch.float64, requires_grad=True)
++    coords = torch.randn(13, 3, dtype=torch.float64)
++    ranks = torch.arange(13)
++    out_a, out_b = [model(q, k, v, beta, coords, ranks) for model in (a, b)]
++    torch.testing.assert_close(out_a, out_b)
++    for ga, gb in zip(torch.autograd.grad(out_a.square().sum(), (q, k, v, beta), retain_graph=True),
++                      torch.autograd.grad(out_b.square().sum(), (q, k, v, beta))):
++        torch.testing.assert_close(ga, gb)
++    for bad in (dict(block_size=0), dict(n_hashes=0), dict(chunk_buckets=0), dict(num_regions=0)):
++        with pytest.raises(ValueError, match="positive"):
++            HashBucketGaussianDelta(2, 4, **bad)
++
++
++def test_60k_event_uses_only_bucket_sized_kernel_matrices(monkeypatch):
++    import models.attention.hept_delta_hash as module
++    original = module.gaussian_kernel
++    sizes = []
++    def bounded_kernel(q, k):
++        sizes.append((q.shape[-2], k.shape[-2]))
++        assert q.shape[-2] <= 16 and k.shape[-2] <= 16
++        return original(q, k)
++    monkeypatch.setattr(module, "gaussian_kernel", bounded_kernel)
++    torch.manual_seed(1)
++    n = 60000
++    model = HashBucketGaussianDelta(1, 3, block_size=16, n_hashes=1, num_regions=150)
++    q, k = [torch.randn(1, n, 3) for _ in range(2)]
++    with torch.no_grad():
++        out = model(q, k, torch.randn(1, n, 2), torch.rand(1, n), torch.randn(n, 3), torch.arange(n))
++    assert out.shape == (1, n, 2) and torch.isfinite(out).all() and sizes
+diff --git a/tests/test_hept_deltanet.py b/tests/test_hept_deltanet.py
+new file mode 100644
+index 0000000..4df2c06
+--- /dev/null
++++ b/tests/test_hept_deltanet.py
+@@ -0,0 +1,113 @@
++"""Gaussian-kernel DeltaNet is checked against a direct kernel recurrence."""
++import sys
++from pathlib import Path
++import pytest
++import torch
++
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from models.attention.hept_delta_kernel import GaussianFourierFeatures, gaussian_kernel, kernel_delta_rule
++from models.attention.deltanet import DeltaNetAttention
++from models.baselines.transformer import Transformer
++from models.attention.hept import prep_qk
++from einops import rearrange
++
++
++def direct_kernel_recurrence(q,k,v,beta):
++    # Independent squared differences and sequential residual writes.
++    kk = torch.exp(-0.5*(k[:,:,None,:]-k[:,None,:,:]).square().sum(-1))
++    qk = torch.exp(-0.5*(q[:,:,None,:]-k[:,None,:,:]).square().sum(-1))
++    writes,outputs = [],[]
++    for t in range(q.shape[1]):
++        pred = torch.zeros_like(v[:,t]) if t == 0 else (kk[:,t,:t,None]*torch.stack(writes,dim=1)).sum(1)
++        writes.append(beta[:,t,None]*(v[:,t]-pred))
++        outputs.append((qk[:,t,:t+1,None]*torch.stack(writes,dim=1)).sum(1))
++    return torch.stack(outputs,dim=1)
++
++
++def test_exact_kernel_delta_outputs_and_gradients():
++    torch.manual_seed(4)
++    q,k,v = [torch.randn(2,7,4,dtype=torch.float64,requires_grad=True) for _ in range(3)]
++    beta = torch.rand(2,7,dtype=torch.float64,requires_grad=True)
++    actual=kernel_delta_rule(q,k,v,beta)
++    expected=direct_kernel_recurrence(q,k,v,beta)
++    torch.testing.assert_close(actual,expected,atol=1e-12,rtol=1e-11)
++    for a,b in zip(torch.autograd.grad(actual.square().sum(),(q,k,v,beta),retain_graph=True),
++                   torch.autograd.grad(expected.square().sum(),(q,k,v,beta))):
++        torch.testing.assert_close(a,b,atol=1e-11,rtol=1e-10)
++
++
++def test_gaussian_features_unit_norm_translation_and_kernel():
++    fmap=GaussianFourierFeatures(2,4,32768,seed=7).double()
++    torch.manual_seed(1)
++    x=torch.randn(2,8,4,dtype=torch.float64)*0.3
++    y=torch.randn(2,6,4,dtype=torch.float64)*0.3
++    fx,fy=fmap(x),fmap(y)
++    torch.testing.assert_close(fx.square().sum(-1),torch.ones(2,8,dtype=x.dtype))
++    approx=fx@fy.transpose(-1,-2)
++    assert (approx-gaussian_kernel(x,y)).abs().max()<0.02
++    shift=torch.randn(2,1,4,dtype=x.dtype)
++    torch.testing.assert_close(fmap(x+shift)@fmap(y+shift).transpose(-1,-2),approx)
++
++
++def layer_options(backend):
++    return dict(h_dim=2,num_heads=1,coords_dim=3,chunk_size=4,deltanet_kernel="hept",
++                deltanet_hept_backend=backend,deltanet_kernel_features=32768,
++                deltanet_qk_activation="identity",deltanet_qk_norm="none",
++                deltanet_impl="torch",deltanet_sort_key="original",deltanet_direction="uni",
++                num_w_per_dist=2,deltanet_kernel_seed=5)
++
++
++def test_rff_layer_approximates_exact_kernel_delta_without_dimension_shrinkage():
++    torch.manual_seed(2)
++    exact=DeltaNetAttention(**layer_options("exact")).double()
++    rff=DeltaNetAttention(**layer_options("rff")).double()
++    rff.load_state_dict(exact.state_dict(),strict=False)
++    rpe=torch.nn.Linear(4,2).double()
++    q,k,v=[torch.randn(7,2,dtype=torch.float64)*0.2 for _ in range(3)]
++    helper=dict(coords=torch.randn(7,3,dtype=torch.float64)*0.1,w_rpe=rpe)
++    a=exact(q,k,v,**helper)
++    b=rff(q,k,v,**helper)
++    assert (a-b).abs().max()<0.015
++    # Reference includes HEPT coordinate augmentation, not just raw q/k.
++    w=rearrange(rpe.weight,"(h d) (r k) -> h d r k",h=1,d=2,k=2)
++    qa,ka=prep_qk(q[:,None],k[:,None],w,helper["coords"])
++    beta=exact.b_proj(v[None]).squeeze(-1).sigmoid()
++    expected=direct_kernel_recurrence(qa.transpose(0,1),ka.transpose(0,1),v[None],beta)
++    torch.testing.assert_close(a,exact.out_linear(expected.squeeze(0)))
++
++
++@pytest.mark.parametrize("backend",["rff","exact","hash"])
++def test_backbone_gaussian_gradient_checkpoint_and_padding(backend):
++    from torch_geometric.data import Data
++    torch.manual_seed(23)
++    options=layer_options(backend)
++    options.update(h_dim=8,num_heads=2,n_layers=2,deltanet_kernel_features=64,deltanet_direction="bi",use_ckpt=True)
++    if backend == "hash":
++        options.update(block_size=4,n_hashes=2,num_regions=3,deltanet_hash_chunk_buckets=1)
++    options.pop("coords_dim")
++    model=Transformer("deltanet",5,3,"tracking",**options)
++    coords=torch.randn(7,3,requires_grad=True)
++    data=Data(x=torch.randn(7,5),coords=coords,edge_index=torch.empty(2,0,dtype=torch.long),batch=torch.zeros(7,dtype=torch.long))
++    out=model(data)
++    assert out.shape==(7,4) and torch.isfinite(out).all()
++    out.square().mean().backward()
++    assert torch.isfinite(coords.grad).all() and coords.grad.abs().sum()>0
++    grad=model.attns[0].w_rpe.weight.grad
++    assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum()>0
++    state=model.state_dict()
++    other=Transformer("deltanet",5,3,"tracking",**options)
++    other.load_state_dict(state)
++    model.eval();other.eval()
++    torch.testing.assert_close(model(data),other(data))
++
++
++def test_exact_size_guard_and_config_validation():
++    options=layer_options("exact");options["deltanet_hept_exact_max_points"]=3
++    layer=DeltaNetAttention(**options)
++    with pytest.raises(ValueError,match="quadratic"):
++        layer(torch.randn(7,2),torch.randn(7,2),torch.randn(7,2),
++              coords=torch.randn(7,3),w_rpe=torch.nn.Linear(4,2))
++    with pytest.raises(ValueError,match="identity"):
++        DeltaNetAttention(**dict(layer_options("rff"),deltanet_qk_activation="silu"))
++    with pytest.raises(ValueError,match="torch"):
++        DeltaNetAttention(**dict(layer_options("rff"),deltanet_impl="fla"))
+diff --git a/tests/test_sharded_equivalence.py b/tests/test_sharded_equivalence.py
+index e7983d8..1a9ebde 100644
+--- a/tests/test_sharded_equivalence.py
++++ b/tests/test_sharded_equivalence.py
+@@ -30,7 +30,11 @@ def main():
+         print("generating synthetic tracking data first...")
+         subprocess.run([sys.executable, str(REPO / "scripts" / "make_synthetic_tracking.py")], check=True)
+ 
+-    tmp = Path(tempfile.mkdtemp(prefix="shard_eq_"))
++    with tempfile.TemporaryDirectory(prefix="shard_eq_") as tmp:
++        compare_shards(Path(tmp))
++
++
++def compare_shards(tmp):
+     print(f"sharding into {tmp}")
+     subprocess.run(
+         [sys.executable, str(REPO / "scripts" / "shard_dataset.py"),
+@@ -56,7 +60,7 @@ def main():
+     mismatches = 0
+     for i in range(len(inmem)):
+         d1, d2 = inmem[i], shard[i]
+-        keys1, keys2 = set(d1.keys), set(d2.keys)
++        keys1, keys2 = set(d1.keys() if callable(d1.keys) else d1.keys), set(d2.keys() if callable(d2.keys) else d2.keys)
+         assert keys1 == keys2, f"event {i} key mismatch: {keys1 ^ keys2}"
+         for key in keys1:
+             if not _same(d1[key], d2[key]):
+diff --git a/tests/test_training_fixes.py b/tests/test_training_fixes.py
+new file mode 100644
+index 0000000..70b569f
+--- /dev/null
++++ b/tests/test_training_fixes.py
+@@ -0,0 +1,54 @@
++import sys
++from pathlib import Path
++import torch
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from utils.losses import InfoNCELoss, deterministic_scatter
++from utils.metrics import acc_and_pr_at_k
++from models.attention.deltanet import delta_rule_recurrence, delta_rule_chunkwise
++
++
++def test_negative_groups_with_gaps():
++    src = torch.tensor([2.,3.,4.],requires_grad=True)
++    index = torch.tensor([1,1,4])
++    torch.testing.assert_close(deterministic_scatter(src,index,"sum",dim_size=6),torch.tensor([0.,5.,0.,0.,4.,0.]))
++    x = torch.randn(4,3,requires_grad=True)
++    # Anchor 0 has a positive but no negative; anchor 2 has both.
++    pairs = torch.tensor([[0,2,2],[1,3,1]])
++    ids = torch.tensor([1,1,2,2])
++    loss = InfoNCELoss(0.05,"l2_rbf")(x,pairs,ids,torch.ones(4),torch.ones(4))
++    sim = torch.exp(-torch.linalg.norm(x[pairs[0]]-x[pairs[1]],dim=-1)/(2*0.75**2))/0.05
++    expected = torch.nn.functional.softplus(sim[2]-sim[1])/2
++    torch.testing.assert_close(loss,expected)
++    loss.backward()
++    assert torch.isfinite(x.grad).all()
++    with pytest.raises(ValueError,match="no positive"):
++        InfoNCELoss(0.05,"l2_rbf")(x,pairs,ids,torch.zeros(4),torch.ones(4))
++
++
++def test_metric_chunking_and_small_event(monkeypatch):
++    x = torch.tensor([[0.],[0.1],[5.],[5.1],[9.],[9.1]])
++    ids = torch.tensor([1,1,2,2,3,3])
++    original = torch.cdist
++    sizes = []
++    def record(a,b,**kw):
++        sizes.append(a.shape[0]); return original(a,b,**kw)
++    monkeypatch.setattr(torch,"cdist",record)
++    full = acc_and_pr_at_k(x,ids,torch.ones(6,dtype=torch.bool),"l2_rbf",batch_size=6)
++    sizes.clear()
++    chunked = acc_and_pr_at_k(x,ids,torch.ones(6,dtype=torch.bool),"l2_rbf",batch_size=2)
++    assert full == chunked and chunked[0] == 1.0 and max(sizes) <= 2
++
++
++def test_deltanet_backward_matches_recurrence():
++    torch.manual_seed(2)
++    q = torch.randn(2,16,4,dtype=torch.float64,requires_grad=True)
++    k = (torch.randn_like(q)*0.1).requires_grad_()
++    v = torch.randn_like(q,requires_grad=True)
++    beta = torch.rand(2,16,dtype=torch.float64,requires_grad=True)
++    ref = delta_rule_recurrence(q,k,v,beta)
++    out = delta_rule_chunkwise(q,k,v,beta,chunk_size=4)
++    for a,b in zip(torch.autograd.grad(ref.square().sum(),(q,k,v,beta),retain_graph=True),
++                   torch.autograd.grad(out.square().sum(),(q,k,v,beta))):
++        torch.testing.assert_close(a,b,atol=1e-10,rtol=1e-9)
+diff --git a/train.py b/train.py
+new file mode 100644
+index 0000000..16f102b
+--- /dev/null
++++ b/train.py
+@@ -0,0 +1,9 @@
++"""Repository-root entry point: python train.py --config ... --kernel hept."""
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
++from run import main
++
++if __name__ == "__main__":
++    main()

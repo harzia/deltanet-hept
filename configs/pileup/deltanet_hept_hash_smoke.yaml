@@ -1,0 +1,42 @@
+# Hash-selected exact Gaussian DeltaNet with independent bucket memories.
+device: cuda:0
+seed: 42
+num_threads: 4
+note: hept-hash-delta-smoke
+model_name: trans_deltanet
+model_kwargs:
+  num_heads: 4
+  h_dim: 16
+  n_layers: 2
+  chunk_size: 16
+  deltanet_sort_key: eta
+  deltanet_direction: bi
+  deltanet_qk_norm: none
+  deltanet_qk_activation: identity
+  deltanet_use_beta: true
+  deltanet_allow_neg_eigval: false
+  deltanet_impl: torch
+  deltanet_kernel: hept
+  deltanet_hept_backend: hash
+  block_size: 32
+  n_hashes: 3
+  num_regions: 140
+  deltanet_hash_chunk_buckets: 64
+  deltanet_hash_checkpoint: true
+  num_w_per_dist: 10
+loss_name: crossentropy
+loss_kwargs: {}
+optimizer_name: adam
+num_epochs: 1
+batch_size: 1
+optimizer_kwargs:
+  lr: 0.001
+lr_scheduler_name: step
+lr_scheduler_kwargs:
+  gamma: 0.5
+  step_size: 500
+data_dir: data/pileup_smoke
+dataset_name: pileup
+main_metric: auc
+mode: max
+max_events: 4
